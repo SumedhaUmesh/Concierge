@@ -3,6 +3,16 @@ from typing import Optional
 
 
 @dataclass
+class Suggestion:
+    type: str              # range | meal | cabin | schedule | music
+    urgency: int           # 1–5
+    headline: str
+    detail: str
+    suggested_action: str  # find_poi:fuel | find_poi:food | find_poi:rest | check_weather | none
+    enriched_action: Optional[dict] = None
+
+
+@dataclass
 class Signal:
     # Vehicle
     fuel_percent: float = 65.0

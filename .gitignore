@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Model weights — too large for git
+models/*.gguf
+models/*.bin
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp

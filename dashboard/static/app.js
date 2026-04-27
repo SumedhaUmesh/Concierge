@@ -1,13 +1,10 @@
 /* ── Gauge math ───────────────────────────────────────────────────────────── */
 
-// Coordinate system: 0° = 12 o'clock, increasing clockwise
 function polarToCartesian(cx, cy, r, deg) {
   const rad = (deg - 90) * Math.PI / 180;
   return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
 }
 
-// Clockwise arc from startDeg, spanning pct × 270°
-// Background arc: arcPath(100, 100, 72, 225, 1.0) → full 270° sweep
 function arcPath(cx, cy, r, startDeg, pct) {
   pct = Math.max(0, Math.min(1, pct));
   if (pct <= 0) return '';
@@ -18,9 +15,7 @@ function arcPath(cx, cy, r, startDeg, pct) {
   const [ex, ey] = polarToCartesian(cx, cy, r, endDeg);
   const large = span > 180 ? 1 : 0;
 
-  // Clamp to avoid SVG degenerate arc when pct ≈ 1
   if (pct >= 0.9999) {
-    // Two-segment arc to avoid start === end
     const [mx, my] = polarToCartesian(cx, cy, r, startDeg + 135);
     return `M ${sx.toFixed(2)} ${sy.toFixed(2)}` +
            ` A ${r} ${r} 0 0 1 ${mx.toFixed(2)} ${my.toFixed(2)}` +
@@ -36,7 +31,7 @@ function setGauge(fillId, pct) {
 
 /* ── Map ──────────────────────────────────────────────────────────────────── */
 
-let map, carMarker, stationMarker, restStopMarker, destMarker;
+let map, carMarker, stationMarker, restStopMarker, destMarker, enrichedMarker;
 
 function initMap() {
   map = L.map('map', {
@@ -50,10 +45,11 @@ function initMap() {
     maxZoom: 19,
   }).addTo(map);
 
-  carMarker     = makeMarker('map-car',      [34.0268, -118.3964]).addTo(map);
-  stationMarker = makeMarker('map-station',  [34.0268, -118.3964]);
-  restStopMarker = makeMarker('map-rest-stop', [34.0268, -118.3964]);
-  destMarker    = makeMarker('map-dest',     [34.0268, -118.3964]);
+  carMarker      = makeMarker('map-car',      [34.0268, -118.3964]).addTo(map);
+  stationMarker  = makeMarker('map-station',  [34.0268, -118.3964]);
+  restStopMarker = makeMarker('map-rest-stop',[34.0268, -118.3964]);
+  destMarker     = makeMarker('map-dest',     [34.0268, -118.3964]);
+  enrichedMarker = makeMarker('map-enriched', [34.0268, -118.3964]);
 }
 
 function makeMarker(className, latlng) {
@@ -79,14 +75,12 @@ function setMarker(marker, lat, lng, show) {
 /* ── Signal handler ───────────────────────────────────────────────────────── */
 
 function onSignal(s) {
-  // Speed gauge
   setGauge('speed-fill', s.speed_kmh / 200);
   document.getElementById('speed-val').textContent = Math.round(s.speed_kmh);
 
-  // Fuel gauge + colour
   const fuelPct = s.fuel_percent / 100;
   setGauge('fuel-fill', fuelPct);
-  const fuelEl = document.getElementById('fuel-fill');
+  const fuelEl   = document.getElementById('fuel-fill');
   const fuelUnit = document.getElementById('fuel-unit');
   let fuelColor = '#4ade80';
   if (s.fuel_percent < 20) fuelColor = '#ef4444';
@@ -95,17 +89,15 @@ function onSignal(s) {
   fuelUnit.style.fill = fuelColor;
   document.getElementById('fuel-val').textContent = Math.round(s.fuel_percent);
 
-  // Center info
-  document.getElementById('time-val').textContent = s.current_time;
+  document.getElementById('time-val').textContent     = s.current_time;
   document.getElementById('location-val').textContent = s.location_label;
-  document.getElementById('range-val').textContent = Math.round(s.range_km);
-  document.getElementById('temp-val').textContent = Math.round(s.cabin_temp_c);
-  document.getElementById('outside-val').textContent = Math.round(s.outside_temp_c);
+  document.getElementById('range-val').textContent    = Math.round(s.range_km);
+  document.getElementById('temp-val').textContent     = Math.round(s.cabin_temp_c);
+  document.getElementById('outside-val').textContent  = Math.round(s.outside_temp_c);
 
-  // Cabin status
   setStatusVal('windows-val', s.windows_open ? 'OPEN' : 'closed', s.windows_open);
   setStatusVal('sunroof-val', s.sunroof_open ? 'OPEN' : 'closed', s.sunroof_open);
-  setStatusVal('ac-val', s.ac_on ? 'ON' : 'off', s.ac_on);
+  setStatusVal('ac-val',      s.ac_on ? 'ON'   : 'off',   s.ac_on);
 
   const rainRow = document.getElementById('rain-row');
   if (s.rain_in_minutes != null) {
@@ -115,13 +107,12 @@ function onSignal(s) {
     rainRow.style.display = 'none';
   }
 
-  // Schedule block
   const schedBlock = document.getElementById('schedule-block');
   if (s.next_meeting_title) {
     schedBlock.style.display = 'block';
     document.getElementById('meeting-title').textContent = s.next_meeting_title;
-    document.getElementById('meeting-time').textContent = s.next_meeting_time || '';
-    document.getElementById('meeting-loc').textContent = s.next_meeting_location || '';
+    document.getElementById('meeting-time').textContent  = s.next_meeting_time || '';
+    document.getElementById('meeting-loc').textContent   = s.next_meeting_location || '';
 
     const trafficRow = document.getElementById('traffic-row');
     const travelRow  = document.getElementById('travel-row');
@@ -142,11 +133,9 @@ function onSignal(s) {
     schedBlock.style.display = 'none';
   }
 
-  // Route
   document.getElementById('station-name').textContent = s.next_gas_station_name;
   document.getElementById('station-km').textContent   = `${Math.round(s.next_gas_station_km)} km`;
 
-  // Map
   if (map) {
     carMarker.setLatLng([s.lat, s.lng]);
     map.panTo([s.lat, s.lng], { animate: true, duration: 0.6 });
@@ -165,6 +154,94 @@ function setStatusVal(id, text, warn) {
   el.className = 'status-val' + (warn ? ' warn' : '');
 }
 
+/* ── Suggestion handler ───────────────────────────────────────────────────── */
+
+const TYPE_ICONS = {
+  range: '⛽',
+  meal: '🍽',
+  cabin: '🌧',
+  schedule: '📅',
+  music: '♪',
+};
+
+function onSuggestion(s) {
+  setAgentDot('active');
+  document.getElementById('agent-status-text').textContent = 'Suggestion';
+
+  const card = document.getElementById('suggestion-card');
+  const idle = document.getElementById('agent-idle');
+  card.style.display = 'block';
+  idle.style.display = 'flex';
+
+  // Remove urgency classes
+  card.className = 'suggestion-card';
+  if (s.urgency >= 4) card.classList.add(`urgency-${s.urgency}`);
+
+  document.getElementById('sug-icon').textContent    = TYPE_ICONS[s.type] || '●';
+  document.getElementById('sug-type').textContent    = s.type.toUpperCase();
+  document.getElementById('sug-urgency').textContent = '●'.repeat(s.urgency);
+  document.getElementById('sug-headline').textContent = s.headline;
+  document.getElementById('sug-detail').textContent   = s.detail;
+
+  const actionRow = document.getElementById('sug-action-row');
+  const actionBtn = document.getElementById('sug-action-btn');
+
+  if (s.enriched_action) {
+    actionRow.style.display = 'block';
+    actionBtn.textContent = s.enriched_action.label || 'Act';
+    actionBtn.onclick = () => handleAction(s.enriched_action);
+
+    // Pin enriched POI on map
+    if (s.enriched_action.lat && s.enriched_action.lng) {
+      setMarker(enrichedMarker, s.enriched_action.lat, s.enriched_action.lng, true);
+    }
+  } else {
+    actionRow.style.display = 'none';
+  }
+}
+
+function handleAction(action) {
+  if (action.type === 'navigate') {
+    const url = `https://maps.google.com/?q=${action.lat},${action.lng}`;
+    window.open(url, '_blank');
+    send({ type: 'user_accept' });
+  } else if (action.type === 'cabin_action') {
+    send({ type: 'user_accept', action: action.action });
+  }
+}
+
+function dismissSuggestion() {
+  document.getElementById('suggestion-card').style.display = 'none';
+  setAgentDot('idle');
+  document.getElementById('agent-status-text').textContent = 'Listening…';
+  setMarker(enrichedMarker, 0, 0, false);
+  send({ type: 'user_dismiss' });
+}
+
+function setAgentDot(state) {
+  const dot = document.getElementById('agent-dot');
+  dot.className = 'agent-dot ' + state;
+}
+
+/* ── Music handler ────────────────────────────────────────────────────────── */
+
+function onMusicResults(data) {
+  const section = document.getElementById('music-section');
+  const list    = document.getElementById('music-tracks');
+  section.style.display = 'block';
+  list.innerHTML = '';
+
+  data.tracks.forEach(t => {
+    const div = document.createElement('div');
+    div.className = 'music-track';
+    div.innerHTML = `
+      <div class="music-track-title">${t.title}</div>
+      <div class="music-track-meta">${t.genres.join(', ')} · energy ${t.energy}/10</div>
+    `;
+    list.appendChild(div);
+  });
+}
+
 /* ── WebSocket ────────────────────────────────────────────────────────────── */
 
 let ws;
@@ -180,7 +257,9 @@ function connect() {
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.type === 'signal') onSignal(msg.data);
+    if (msg.type === 'signal')        onSignal(msg.data);
+    else if (msg.type === 'suggestion')  onSuggestion(msg.data);
+    else if (msg.type === 'music_results') onMusicResults(msg.data);
   };
 }
 
@@ -208,6 +287,24 @@ document.addEventListener('DOMContentLoaded', () => {
       document.querySelectorAll('[data-scenario]').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById('scenario-label').textContent = name.replace('_', ' ');
+      // Hide any previous suggestion
+      document.getElementById('suggestion-card').style.display = 'none';
+      document.getElementById('music-section').style.display = 'none';
+      setAgentDot('');
+      document.getElementById('agent-status-text').textContent = 'Listening…';
     });
+  });
+
+  document.getElementById('sug-dismiss-btn').addEventListener('click', dismissSuggestion);
+
+  document.getElementById('music-btn').addEventListener('click', () => {
+    const query = document.getElementById('music-input').value.trim();
+    if (!query) return;
+    send({ type: 'music_query', query });
+    document.getElementById('music-input').value = '';
+  });
+
+  document.getElementById('music-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('music-btn').click();
   });
 });

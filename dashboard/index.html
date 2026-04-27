@@ -69,6 +69,36 @@
 
     <div class="sidebar">
 
+      <!-- Agent suggestion panel -->
+      <div id="agent-section">
+        <div class="section-label">CONCIERGE</div>
+        <div id="agent-idle" class="agent-idle">
+          <span class="agent-dot" id="agent-dot"></span>
+          <span id="agent-status-text">Listening…</span>
+        </div>
+        <div id="suggestion-card" class="suggestion-card" style="display:none">
+          <div class="suggestion-header">
+            <span class="suggestion-icon" id="sug-icon">●</span>
+            <span class="suggestion-type" id="sug-type">—</span>
+            <span class="suggestion-urgency" id="sug-urgency"></span>
+            <button class="sug-dismiss" id="sug-dismiss-btn" title="Dismiss">✕</button>
+          </div>
+          <div class="suggestion-headline" id="sug-headline"></div>
+          <div class="suggestion-detail" id="sug-detail"></div>
+          <div id="sug-action-row" style="display:none">
+            <button class="sug-action-btn" id="sug-action-btn"></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Music query -->
+      <div id="music-section" style="display:none">
+        <div class="section-label" style="margin-top:14px">MUSIC</div>
+        <div id="music-tracks" class="music-list"></div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
       <!-- Cabin status -->
       <div class="section-label">CABIN</div>
       <div class="status-grid">
@@ -134,6 +164,13 @@
         <button data-scenario="schedule">Schedule</button>
       </div>
 
+      <!-- Music query input -->
+      <div class="section-label" style="margin-top:14px">ASK FOR MUSIC</div>
+      <div class="music-input-row">
+        <input id="music-input" class="music-input" type="text" placeholder="something chill for the highway…" />
+        <button id="music-btn" class="music-btn">Go</button>
+      </div>
+
     </div>
   </div>
 
@@ -143,6 +180,8 @@
     <span id="status-label">connecting…</span>
     <span class="statusbar-sep">·</span>
     <span id="scenario-label">—</span>
+    <span class="statusbar-sep">·</span>
+    <span id="agent-stats-label" style="color: var(--dim); font-size:10px">model loading…</span>
   </div>
 
 </div>

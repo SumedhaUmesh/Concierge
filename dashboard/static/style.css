@@ -326,6 +326,186 @@ html, body {
   transform: rotate(45deg);
 }
 
+.map-enriched {
+  width: 12px;
+  height: 12px;
+  background: #6df0c8;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(109,240,200,0.8);
+}
+
+/* ── Agent / suggestion panel ─────────────────────────────────────────────── */
+
+#agent-section {
+  margin-bottom: 12px;
+}
+
+.agent-idle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--dim);
+  padding: 6px 0;
+}
+
+.agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dim);
+  flex-shrink: 0;
+  transition: background 0.4s;
+}
+
+.agent-dot.active    { background: #6df0c8; box-shadow: 0 0 6px rgba(109,240,200,0.6); }
+.agent-dot.thinking  { background: var(--amber); animation: pulse 1s infinite; }
+
+.suggestion-card {
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 12px;
+  transition: border-color 0.3s;
+}
+
+.suggestion-card.urgency-4, .suggestion-card.urgency-5 {
+  border-color: var(--amber);
+}
+
+.suggestion-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.suggestion-icon { font-size: 10px; }
+.suggestion-type {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+  text-transform: uppercase;
+  flex: 1;
+}
+
+.suggestion-urgency {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--dim);
+}
+
+.sug-dismiss {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+}
+.sug-dismiss:hover { color: var(--text); }
+
+.suggestion-headline {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--bright);
+  line-height: 1.35;
+  margin-bottom: 5px;
+}
+
+.suggestion-detail {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.sug-action-btn {
+  width: 100%;
+  background: #1d2b22;
+  border: 1px solid #2e4a36;
+  color: #6df0c8;
+  font-family: var(--font);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 7px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sug-action-btn:hover {
+  background: #223328;
+  border-color: #4d9966;
+}
+
+.sidebar-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+/* ── Music ────────────────────────────────────────────────────────────────── */
+
+.music-input-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.music-input {
+  flex: 1;
+  background: #141414;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 7px 10px;
+  border-radius: 5px;
+  outline: none;
+}
+.music-input:focus { border-color: var(--dim); }
+.music-input::placeholder { color: var(--muted); }
+
+.music-btn {
+  background: #141414;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 7px 12px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.music-btn:hover { color: var(--text); border-color: var(--dim); }
+
+.music-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.music-track {
+  background: #141414;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 7px 10px;
+}
+
+.music-track-title {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.music-track-meta {
+  font-size: 10px;
+  color: var(--dim);
+}
+
 /* ── Leaflet overrides ────────────────────────────────────────────────────── */
 
 .leaflet-container { background: #0a0a0a; }

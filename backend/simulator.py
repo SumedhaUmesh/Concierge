@@ -2,7 +2,7 @@ import asyncio
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Set, Any, Optional
+from typing import Any, Optional, Set
 
 from signals import Signal
 
@@ -13,6 +13,7 @@ class Simulator:
     def __init__(self):
         self.state = Signal()
         self._clients: Set[Any] = set()
+        self._agents: list = []
         self._task: Optional[asyncio.Task] = None
 
     # ── Client management ────────────────────────────────────────────────────
@@ -23,19 +24,32 @@ class Simulator:
     def remove_client(self, ws):
         self._clients.discard(ws)
 
+    def add_agent(self, agent):
+        self._agents.append(agent)
+
+    def remove_agent(self, agent):
+        try:
+            self._agents.remove(agent)
+        except ValueError:
+            pass
+
     # ── Broadcast ────────────────────────────────────────────────────────────
 
     async def broadcast(self):
         if not self._clients:
             return
         payload = json.dumps({"type": "signal", "data": asdict(self.state)})
-        dead = set()
+        dead: Set[Any] = set()
         for ws in self._clients:
             try:
                 await ws.send_text(payload)
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+        # Tick all registered agent loops (non-blocking)
+        for agent in list(self._agents):
+            asyncio.create_task(agent.tick(self.state))
 
     # ── Scenario control ─────────────────────────────────────────────────────
 
