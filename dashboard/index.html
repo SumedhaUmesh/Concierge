@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Concierge</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+</head>
+<body>
+
+<div class="cluster">
+
+  <!-- ── Top row: gauges ───────────────────────────────────────────── -->
+  <div class="gauges-row">
+
+    <!-- Speed gauge -->
+    <div class="gauge-wrap">
+      <svg class="gauge-svg" viewBox="0 0 200 200">
+        <path class="gauge-track"
+          d="M 49.09 150.91 A 72 72 0 1 1 150.91 150.91"/>
+        <path class="gauge-fill" id="speed-fill" d="" stroke="#e2e8f0"/>
+        <text class="gauge-value" id="speed-val" x="100" y="108">0</text>
+        <text class="gauge-unit" x="100" y="132">km/h</text>
+      </svg>
+      <div class="gauge-label">SPEED</div>
+    </div>
+
+    <!-- Center info -->
+    <div class="center-info">
+      <div class="time" id="time-val">10:00</div>
+      <div class="location" id="location-val">Highway 405, Los Angeles</div>
+      <div class="info-pills">
+        <div class="pill">
+          <span class="pill-val" id="range-val">280</span>
+          <span class="pill-unit">km range</span>
+        </div>
+        <div class="pill-sep">·</div>
+        <div class="pill">
+          <span class="pill-val" id="temp-val">22</span>
+          <span class="pill-unit">°C cabin</span>
+        </div>
+        <div class="pill-sep">·</div>
+        <div class="pill">
+          <span class="pill-val" id="outside-val">18</span>
+          <span class="pill-unit">°C outside</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Fuel gauge -->
+    <div class="gauge-wrap">
+      <svg class="gauge-svg" viewBox="0 0 200 200">
+        <path class="gauge-track"
+          d="M 49.09 150.91 A 72 72 0 1 1 150.91 150.91"/>
+        <path class="gauge-fill" id="fuel-fill" d="" stroke="#4ade80"/>
+        <text class="gauge-value" id="fuel-val" x="100" y="108">65</text>
+        <text class="gauge-unit" id="fuel-unit" x="100" y="132">% fuel</text>
+      </svg>
+      <div class="gauge-label">FUEL</div>
+    </div>
+
+  </div>
+
+  <!-- ── Main area: map + sidebar ──────────────────────────────────── -->
+  <div class="main-area">
+
+    <div id="map"></div>
+
+    <div class="sidebar">
+
+      <!-- Cabin status -->
+      <div class="section-label">CABIN</div>
+      <div class="status-grid">
+        <div class="status-row">
+          <span class="status-key">Windows</span>
+          <span class="status-val" id="windows-val">closed</span>
+        </div>
+        <div class="status-row">
+          <span class="status-key">Sunroof</span>
+          <span class="status-val" id="sunroof-val">closed</span>
+        </div>
+        <div class="status-row">
+          <span class="status-key">AC</span>
+          <span class="status-val" id="ac-val">off</span>
+        </div>
+        <div class="status-row" id="rain-row" style="display:none">
+          <span class="status-key">Rain</span>
+          <span class="status-val warn" id="rain-val">—</span>
+        </div>
+      </div>
+
+      <!-- Schedule block -->
+      <div id="schedule-block" style="display:none">
+        <div class="section-label" style="margin-top:16px">NEXT</div>
+        <div class="meeting-card">
+          <div class="meeting-title" id="meeting-title"></div>
+          <div class="meeting-meta">
+            <span id="meeting-time"></span>
+            <span class="meta-sep">·</span>
+            <span id="meeting-loc"></span>
+          </div>
+          <div class="status-row" id="traffic-row" style="display:none; margin-top:6px">
+            <span class="status-key">Traffic</span>
+            <span class="status-val warn" id="traffic-val"></span>
+          </div>
+          <div class="status-row" id="travel-row" style="display:none; margin-top:4px">
+            <span class="status-key">Drive</span>
+            <span class="status-val" id="travel-val"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Fuel detail -->
+      <div class="section-label" style="margin-top:16px">ROUTE</div>
+      <div class="status-grid">
+        <div class="status-row">
+          <span class="status-key">Next station</span>
+          <span class="status-val" id="station-name">Shell, Exit 14</span>
+        </div>
+        <div class="status-row">
+          <span class="status-key">Distance</span>
+          <span class="status-val" id="station-km">45 km</span>
+        </div>
+      </div>
+
+      <!-- Scenarios -->
+      <div class="section-label" style="margin-top:20px">SCENARIOS</div>
+      <div class="scenario-btns">
+        <button data-scenario="quiet">Quiet</button>
+        <button data-scenario="range_critical">Range</button>
+        <button data-scenario="meal">Meal</button>
+        <button data-scenario="cabin">Cabin</button>
+        <button data-scenario="schedule">Schedule</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Status bar ─────────────────────────────────────────────────── -->
+  <div class="statusbar">
+    <span class="status-dot" id="status-dot"></span>
+    <span id="status-label">connecting…</span>
+    <span class="statusbar-sep">·</span>
+    <span id="scenario-label">—</span>
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

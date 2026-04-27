@@ -1,0 +1,37 @@
+[
+  {
+    "fuel_percent": 71,
+    "range_km": 305,
+    "speed_kmh": 65,
+    "lat": 34.0320,
+    "lng": -118.6890,
+    "location_label": "Pacific Coast Highway, Malibu",
+    "outside_temp_c": 23,
+    "cabin_temp_c": 26,
+    "target_temp_c": 22,
+    "windows_open": true,
+    "sunroof_open": true,
+    "ac_on": false,
+    "rain_in_minutes": 9,
+    "is_on_highway": false,
+    "_delay": 2
+  },
+  {
+    "lat": 34.0280,
+    "lng": -118.6720,
+    "rain_in_minutes": 6,
+    "_delay": 2
+  },
+  {
+    "lat": 34.0240,
+    "lng": -118.6550,
+    "rain_in_minutes": 4,
+    "_delay": 2
+  },
+  {
+    "lat": 34.0200,
+    "lng": -118.6380,
+    "rain_in_minutes": 2,
+    "_delay": 0
+  }
+]

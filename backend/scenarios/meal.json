@@ -1,0 +1,33 @@
+[
+  {
+    "fuel_percent": 58,
+    "range_km": 245,
+    "speed_kmh": 100,
+    "lat": 34.1350,
+    "lng": -118.2680,
+    "location_label": "I-5 North, Glendale",
+    "current_time": "12:15",
+    "hours_since_meal": 4.2,
+    "is_on_highway": true,
+    "next_rest_stop_km": 14,
+    "next_rest_stop_lat": 34.1820,
+    "next_rest_stop_lng": -118.2450,
+    "_delay": 2
+  },
+  {
+    "current_time": "12:22",
+    "hours_since_meal": 4.4,
+    "lat": 34.1520,
+    "lng": -118.2590,
+    "next_rest_stop_km": 8,
+    "_delay": 2
+  },
+  {
+    "current_time": "12:30",
+    "hours_since_meal": 5.5,
+    "lat": 34.1680,
+    "lng": -118.2510,
+    "next_rest_stop_km": 3,
+    "_delay": 0
+  }
+]

@@ -1,0 +1,36 @@
+[
+  {
+    "fuel_percent": 80,
+    "range_km": 345,
+    "speed_kmh": 0,
+    "lat": 34.0195,
+    "lng": -118.4912,
+    "location_label": "Santa Monica, CA",
+    "current_time": "08:25",
+    "next_meeting_title": "Team standup",
+    "next_meeting_time": "09:00",
+    "next_meeting_location": "Burbank, CA",
+    "normal_travel_minutes": 35,
+    "traffic_delay_minutes": 15,
+    "destination": "Burbank, CA",
+    "destination_km": 45,
+    "destination_lat": 34.1808,
+    "destination_lng": -118.3090,
+    "is_on_highway": false,
+    "_delay": 2
+  },
+  {
+    "current_time": "08:27",
+    "_delay": 2
+  },
+  {
+    "current_time": "08:29",
+    "traffic_delay_minutes": 18,
+    "_delay": 2
+  },
+  {
+    "current_time": "08:32",
+    "traffic_delay_minutes": 20,
+    "_delay": 0
+  }
+]

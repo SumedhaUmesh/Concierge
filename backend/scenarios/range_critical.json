@@ -1,0 +1,41 @@
+[
+  {
+    "fuel_percent": 32,
+    "range_km": 135,
+    "speed_kmh": 105,
+    "lat": 34.0624,
+    "lng": -118.3286,
+    "location_label": "I-5 North, Los Angeles",
+    "next_gas_station_name": "Chevron, Exit 22",
+    "next_gas_station_km": 48,
+    "next_gas_station_lat": 34.1050,
+    "next_gas_station_lng": -118.2700,
+    "is_on_highway": true,
+    "_delay": 2
+  },
+  {
+    "fuel_percent": 22,
+    "range_km": 92,
+    "lat": 34.0890,
+    "lng": -118.3010,
+    "next_gas_station_km": 61,
+    "_delay": 2
+  },
+  {
+    "fuel_percent": 14,
+    "range_km": 58,
+    "lat": 34.1180,
+    "lng": -118.2820,
+    "location_label": "I-5 North, near Glendale",
+    "next_gas_station_km": 74,
+    "_delay": 2
+  },
+  {
+    "fuel_percent": 11,
+    "range_km": 46,
+    "lat": 34.1350,
+    "lng": -118.2680,
+    "next_gas_station_km": 80,
+    "_delay": 0
+  }
+]
