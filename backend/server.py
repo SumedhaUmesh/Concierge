@@ -13,6 +13,7 @@ from signals import Suggestion
 from agent.loop import AgentLoop
 from tool_router import enrich
 from agent import music as music_mod
+from agent.voice import tts, asr, classifier
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -32,9 +33,10 @@ async def root():
 
 @app.on_event("startup")
 async def _warmup():
-    # Trigger model load in background so the first WebSocket tick isn't slow
+    # Load model eagerly at startup so the first gate call doesn't pay
+    # the full load latency. The lock in llm.py ensures this is safe.
     from agent.llm import get_llm  # noqa: PLC0415
-    asyncio.create_task(asyncio.to_thread(get_llm))
+    await asyncio.to_thread(get_llm)
 
 
 @app.websocket("/ws")
@@ -42,24 +44,30 @@ async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     sim.add_client(websocket)
 
-    # Push current state immediately
     await websocket.send_text(
         json.dumps({"type": "signal", "data": asdict(sim.state)})
     )
 
-    # Per-connection agent loop
+    # Track latest suggestion for voice response routing
+    latest_suggestion: list[Suggestion] = []
+
     async def _on_suggestion(suggestion: Suggestion):
-        # Enrich with real POI / weather data from tools
         try:
             await enrich(suggestion, sim.state)
         except Exception:
-            log.exception("Tool enrichment failed — sending bare suggestion")
+            log.exception("Tool enrichment failed")
+
+        latest_suggestion.clear()
+        latest_suggestion.append(suggestion)
 
         payload = json.dumps({"type": "suggestion", "data": asdict(suggestion)})
         try:
             await websocket.send_text(payload)
         except Exception:
             pass
+
+        # Read headline aloud
+        asyncio.create_task(tts.speak(suggestion.headline))
 
     agent = AgentLoop(on_suggestion=_on_suggestion)
     sim.add_agent(agent)
@@ -78,11 +86,62 @@ async def ws_endpoint(websocket: WebSocket):
                 agent.dismiss()
             elif kind == "user_accept":
                 agent.accept()
+            elif kind == "mute":
+                tts.set_muted(msg.get("muted", False))
             elif kind == "music_query":
                 asyncio.create_task(_handle_music(websocket, msg.get("query", "")))
+            elif kind == "voice_input":
+                asyncio.create_task(
+                    _handle_voice(websocket, agent, latest_suggestion, msg.get("audio", ""))
+                )
     except WebSocketDisconnect:
         sim.remove_client(websocket)
         sim.remove_agent(agent)
+
+
+async def _handle_voice(
+    websocket: WebSocket,
+    agent: AgentLoop,
+    latest_suggestion: list,
+    audio_b64: str,
+):
+    transcript = await asr.transcribe(audio_b64)
+    if not transcript:
+        return
+
+    # Echo transcript to dashboard
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "transcript",
+            "data": {"text": transcript},
+        }))
+    except Exception:
+        pass
+
+    intent = await classifier.classify(transcript)
+
+    if intent == "accept":
+        agent.accept()
+        try:
+            await websocket.send_text(json.dumps({"type": "user_accept"}))
+        except Exception:
+            pass
+
+    elif intent == "dismiss":
+        agent.dismiss()
+        try:
+            await websocket.send_text(json.dumps({"type": "user_dismiss"}))
+        except Exception:
+            pass
+
+    elif intent == "music":
+        await _handle_music(websocket, transcript)
+
+    elif intent == "defer":
+        agent.dismiss()
+        asyncio.create_task(tts.speak("Got it. I'll check back in a few minutes."))
+
+    # intent == "query": no action, transcript already echoed to dashboard
 
 
 async def _handle_music(websocket: WebSocket, query: str):

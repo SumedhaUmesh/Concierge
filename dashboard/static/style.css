@@ -447,6 +447,50 @@ html, body {
   margin: 12px 0;
 }
 
+/* ── Push-to-talk + mute ─────────────────────────────────────────────────── */
+
+.mute-btn {
+  background: none;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0.5;
+  padding: 0;
+  line-height: 1;
+  transition: opacity 0.2s;
+}
+.mute-btn:hover { opacity: 1; }
+.mute-btn.muted  { opacity: 0.3; }
+
+.ptt-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px;
+  background: #141414;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  user-select: none;
+}
+.ptt-btn:hover { border-color: var(--dim); color: var(--text); }
+.ptt-btn.recording {
+  background: #1a0a0a;
+  border-color: var(--red);
+  color: var(--red);
+  animation: pulse 0.8s infinite;
+}
+
+.transcript-row {
+  margin-top: 7px;
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+  line-height: 1.4;
+}
+
 /* ── Music ────────────────────────────────────────────────────────────────── */
 
 .music-input-row {
@@ -492,7 +536,24 @@ html, body {
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
 }
+.music-track:hover { background: #1c1c1c; border-color: #444; }
+.music-track.playing { border-color: var(--accent); background: #0d1a0d; }
+.music-track.music-direct { border-color: #555; }
+
+.music-track-play {
+  font-size: 11px;
+  color: var(--dim);
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.music-track.playing .music-track-play { color: var(--accent); }
 
 .music-track-title {
   font-size: 12px;
@@ -504,6 +565,29 @@ html, body {
 .music-track-meta {
   font-size: 10px;
   color: var(--dim);
+}
+
+.now-playing-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0d1a0d;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--accent);
+}
+#now-playing-title { flex: 1; }
+.stop-btn {
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 3px;
+  padding: 1px 6px;
+  cursor: pointer;
+  font-size: 10px;
 }
 
 /* ── Leaflet overrides ────────────────────────────────────────────────────── */

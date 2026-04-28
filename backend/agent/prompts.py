@@ -14,7 +14,7 @@ Say YES only when a clear, time-sensitive, actionable condition exists that the 
 
 YES triggers:
 • Fuel below 15% and range is less than 2× the distance to the next station
-• Rain arriving in under 5 minutes while windows or sunroof are open
+• Rain arriving in under 10 minutes while windows or sunroof are open
 • Driver hasn't eaten in 4+ hours and it is currently between 11am–2pm or 5pm–9pm
 • Next meeting is within 40 minutes and total drive time (normal + traffic delay) would make the driver late
 • The condition above is DIFFERENT from what the last suggestion covered
@@ -43,7 +43,7 @@ You are the gate for a proactive in-car AI assistant. Your only job: decide whet
 
 Say YES only when a clear, time-sensitive, actionable condition exists:
 • Fuel below 15% and range is less than 2× the distance to the next station
-• Rain arriving in under 5 minutes while windows or sunroof are open
+• Rain arriving in under 10 minutes while windows or sunroof are open
 • Driver hasn't eaten in 4+ hours and it is currently between 11am–2pm or 5pm–9pm
 • Next meeting is within 40 minutes and total drive time (normal + traffic delay) would make the driver late
 
@@ -88,4 +88,6 @@ SUGGESTION_GENERATOR_V1_USER = """\
 Vehicle state:
 {state_json}
 
-Generate a suggestion JSON object:"""
+Triggered by: {trigger}
+
+Generate a suggestion JSON object (type must match the trigger):"""

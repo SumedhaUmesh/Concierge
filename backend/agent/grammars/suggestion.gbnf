@@ -1,14 +1,4 @@
-# GBNF grammar for Concierge suggestion JSON output.
-# Forces the model to produce a JSON object with exactly the required fields
-# and constrained enum values, eliminating parse failures.
-
-root ::= "{" sp
-  "\"type\":"           sp type-val  sp "," sp
-  "\"urgency\":"        sp urgency-val sp "," sp
-  "\"headline\":"       sp string-val sp "," sp
-  "\"detail\":"         sp string-val sp "," sp
-  "\"suggested_action\":" sp action-val sp
-"}"
+root ::= "{" sp "\"type\":" sp type-val sp "," sp "\"urgency\":" sp urgency-val sp "," sp "\"headline\":" sp string-val sp "," sp "\"detail\":" sp string-val sp "," sp "\"suggested_action\":" sp action-val sp "}"
 
 type-val    ::= "\"range\"" | "\"meal\"" | "\"cabin\"" | "\"schedule\"" | "\"music\""
 urgency-val ::= "1" | "2" | "3" | "4" | "5"

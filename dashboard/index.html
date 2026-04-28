@@ -71,7 +71,10 @@
 
       <!-- Agent suggestion panel -->
       <div id="agent-section">
-        <div class="section-label">CONCIERGE</div>
+        <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
+          CONCIERGE
+          <button id="mute-btn" class="mute-btn" title="Mute voice">🔊</button>
+        </div>
         <div id="agent-idle" class="agent-idle">
           <span class="agent-dot" id="agent-dot"></span>
           <span id="agent-status-text">Listening…</span>
@@ -88,12 +91,25 @@
           <div id="sug-action-row" style="display:none">
             <button class="sug-action-btn" id="sug-action-btn"></button>
           </div>
+          <div id="transcript-row" style="display:none" class="transcript-row">
+            <span id="transcript-text"></span>
+          </div>
         </div>
+
+        <!-- Push-to-talk -->
+        <button id="ptt-btn" class="ptt-btn" title="Hold to speak">
+          <span id="ptt-icon">🎙</span>
+        </button>
       </div>
 
       <!-- Music query -->
       <div id="music-section" style="display:none">
         <div class="section-label" style="margin-top:14px">MUSIC</div>
+        <div id="now-playing" style="display:none" class="now-playing-bar">
+          <span id="now-playing-icon">▶</span>
+          <span id="now-playing-title"></span>
+          <button id="stop-btn" class="stop-btn" onclick="stopTrack()">■</button>
+        </div>
         <div id="music-tracks" class="music-list"></div>
       </div>
 

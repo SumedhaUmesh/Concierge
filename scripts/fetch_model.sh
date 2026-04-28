@@ -14,8 +14,17 @@ PYTHON="$(pwd)/backend/.venv/bin/python3.13"
 echo "Downloading $FILE from $REPO into models/…"
 mkdir -p "$MODELS_DIR"
 
-"$PYTHON" -m huggingface_hub download "$REPO" "$FILE" \
-  --local-dir "$MODELS_DIR" \
-  --local-dir-use-symlinks False
+"$PYTHON" - <<EOF
+from huggingface_hub import hf_hub_download
+import shutil, os
+
+path = hf_hub_download(
+    repo_id="$REPO",
+    filename="$FILE",
+    local_dir="$MODELS_DIR",
+    local_dir_use_symlinks=False,
+)
+print(f"Saved to: {path}")
+EOF
 
 echo "Done — model saved to models/$FILE"

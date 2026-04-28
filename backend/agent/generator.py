@@ -17,7 +17,7 @@ from signals import Suggestion
 log = logging.getLogger(__name__)
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammars" / "suggestion.gbnf"
-_grammar_obj = None   # loaded on first use
+_grammar_obj = None  # loaded on first use; reload server to pick up .gbnf changes
 
 # Metrics
 _total_calls = 0
@@ -57,7 +57,7 @@ def _compact_state(state) -> dict:
     return compact
 
 
-async def generate_suggestion(state_window: list) -> Optional[Suggestion]:
+async def generate_suggestion(state_window: list, trigger: Optional[str] = None) -> Optional[Suggestion]:
     global _total_calls, _parse_failures
     _total_calls += 1
     t0 = time.monotonic()
@@ -67,7 +67,10 @@ async def generate_suggestion(state_window: list) -> Optional[Suggestion]:
 
     messages = [
         {"role": "system", "content": SUGGESTION_GENERATOR_V1_SYSTEM},
-        {"role": "user", "content": SUGGESTION_GENERATOR_V1_USER.format(state_json=state_json)},
+        {"role": "user", "content": SUGGESTION_GENERATOR_V1_USER.format(
+            state_json=state_json,
+            trigger=trigger or "generate the most relevant suggestion based on state",
+        )},
     ]
 
     grammar = _get_grammar()

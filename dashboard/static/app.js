@@ -223,7 +223,151 @@ function setAgentDot(state) {
   dot.className = 'agent-dot ' + state;
 }
 
+/* ── Track synthesizer ────────────────────────────────────────────────────── */
+
+const player = {
+  ctx: null,
+  oscs: [],
+  masterGain: null,
+
+  play(track) {
+    this.stop();
+    this.ctx = new AudioContext();
+
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.setValueAtTime(0, this.ctx.currentTime);
+    this.masterGain.gain.linearRampToValueAtTime(0.18, this.ctx.currentTime + 1.5);
+    this.masterGain.connect(this.ctx.destination);
+
+    const energy  = track.energy;          // 1–10
+    const bps     = track.tempo / 60;      // beats per second
+    const baseHz  = 55 + energy * 14;      // 69 Hz (calm) → 195 Hz (intense)
+    const wave    = energy <= 3 ? 'sine' : energy <= 6 ? 'triangle' : 'sawtooth';
+
+    // Root pad
+    const root = this.ctx.createOscillator();
+    root.type = wave;
+    root.frequency.value = baseHz;
+    const rootGain = this.ctx.createGain();
+    rootGain.gain.value = 0.45;
+    root.connect(rootGain).connect(this.masterGain);
+    root.start();
+
+    // Fifth harmonic (perfect 5th = ×1.5)
+    const fifth = this.ctx.createOscillator();
+    fifth.type = 'sine';
+    fifth.frequency.value = baseHz * 1.5;
+    const fifthGain = this.ctx.createGain();
+    fifthGain.gain.value = 0.2;
+    fifth.connect(fifthGain).connect(this.masterGain);
+    fifth.start();
+
+    // Octave (subtle shimmer on high energy)
+    const oct = this.ctx.createOscillator();
+    oct.type = 'sine';
+    oct.frequency.value = baseHz * 2;
+    const octGain = this.ctx.createGain();
+    octGain.gain.value = energy > 5 ? 0.12 : 0.04;
+    oct.connect(octGain).connect(this.masterGain);
+    oct.start();
+
+    // LFO — tempo-locked tremolo
+    const lfo = this.ctx.createOscillator();
+    lfo.frequency.value = bps * (energy > 6 ? 1 : 0.25);
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 0.04;
+    lfo.connect(lfoGain).connect(this.masterGain.gain);
+    lfo.start();
+
+    // Lowpass filter — roll off harshness on calm tracks
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 300 + energy * 120;
+    root.disconnect(rootGain);
+    root.connect(filter);
+    filter.connect(rootGain);
+
+    this.oscs = [root, fifth, oct, lfo];
+  },
+
+  stop() {
+    if (!this.ctx) return;
+    const g = this.masterGain;
+    const c = this.ctx;
+    const os = this.oscs;
+    g.gain.cancelScheduledValues(c.currentTime);
+    g.gain.linearRampToValueAtTime(0, c.currentTime + 0.8);
+    setTimeout(() => {
+      os.forEach(o => { try { o.stop(); } catch (_) {} });
+      c.close();
+    }, 900);
+    this.ctx = null;
+    this.oscs = [];
+    document.getElementById('now-playing').style.display = 'none';
+  },
+};
+
+let _previewAudio = null;
+
+async function playTrack(track) {
+  // Stop any previous audio
+  if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
+  player.stop();
+
+  // Start synth immediately as placeholder
+  player.play(track);
+
+  const bar = document.getElementById('now-playing');
+  bar.style.display = 'flex';
+  document.getElementById('now-playing-title').textContent = `${track.title} · ${track.genres[0]} — loading…`;
+
+  // Search iTunes for a matching preview (no API key needed)
+  const query = encodeURIComponent(`${track.genres[0]} ${track.mood[0]}`);
+  try {
+    const res = await fetch(
+      `https://itunes.apple.com/search?term=${query}&media=music&entity=song&limit=5`
+    );
+    const data = await res.json();
+    const hit = data.results.find(r => r.previewUrl);
+    if (hit) {
+      player.stop();  // fade out synth
+      _previewAudio = new Audio(hit.previewUrl);
+      _previewAudio.volume = 0.7;
+      _previewAudio.play();
+      document.getElementById('now-playing-title').textContent =
+        `${hit.trackName} — ${hit.artistName}`;
+      _previewAudio.onended = () => {
+        document.getElementById('now-playing').style.display = 'none';
+        _previewAudio = null;
+      };
+    } else {
+      document.getElementById('now-playing-title').textContent =
+        `${track.title} · ${track.genres[0]}`;
+    }
+  } catch (_) {
+    // iTunes unreachable — synth keeps playing
+    document.getElementById('now-playing-title').textContent =
+      `${track.title} · ${track.genres[0]}`;
+  }
+}
+
+function stopTrack() {
+  if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
+  player.stop();
+  document.getElementById('now-playing').style.display = 'none';
+}
+
 /* ── Music handler ────────────────────────────────────────────────────────── */
+
+function onTranscript(data) {
+  const row = document.getElementById('transcript-row');
+  const txt = document.getElementById('transcript-text');
+  row.style.display = 'block';
+  txt.textContent = `"${data.text}"`;
+  setAgentDot('active');
+  document.getElementById('agent-status-text').textContent = 'Heard';
+  setTimeout(() => { row.style.display = 'none'; }, 5000);
+}
 
 function onMusicResults(data) {
   const section = document.getElementById('music-section');
@@ -231,15 +375,171 @@ function onMusicResults(data) {
   section.style.display = 'block';
   list.innerHTML = '';
 
+  // If the query looks like a specific song ("X by Y"), offer a direct iTunes search first
+  if (/\bby\b/i.test(data.query)) {
+    const direct = document.createElement('div');
+    direct.className = 'music-track music-direct';
+    direct.title = 'Search iTunes for this exact song';
+    direct.innerHTML = `
+      <div class="music-track-play">▶</div>
+      <div>
+        <div class="music-track-title">"${data.query}"</div>
+        <div class="music-track-meta">iTunes preview</div>
+      </div>
+    `;
+    direct.addEventListener('click', () => {
+      document.querySelectorAll('.music-track').forEach(el => el.classList.remove('playing'));
+      direct.classList.add('playing');
+      direct.querySelector('.music-track-play').textContent = '♪';
+      playITunesDirect(data.query);
+    });
+    list.appendChild(direct);
+  }
+
   data.tracks.forEach(t => {
     const div = document.createElement('div');
     div.className = 'music-track';
+    div.title = 'Click to play';
     div.innerHTML = `
-      <div class="music-track-title">${t.title}</div>
-      <div class="music-track-meta">${t.genres.join(', ')} · energy ${t.energy}/10</div>
+      <div class="music-track-play">▶</div>
+      <div>
+        <div class="music-track-title">${t.title}</div>
+        <div class="music-track-meta">${t.genres.join(', ')} · energy ${t.energy}/10</div>
+      </div>
     `;
+    div.addEventListener('click', () => {
+      document.querySelectorAll('.music-track').forEach(el => el.classList.remove('playing'));
+      div.classList.add('playing');
+      div.querySelector('.music-track-play').textContent = '♪';
+      playTrack(t);
+    });
     list.appendChild(div);
   });
+}
+
+async function playITunesDirect(query) {
+  if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
+  player.stop();
+
+  const bar = document.getElementById('now-playing');
+  bar.style.display = 'flex';
+  document.getElementById('now-playing-title').textContent = `Searching: "${query}"…`;
+
+  try {
+    const res = await fetch(
+      `https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=music&entity=song&limit=5`
+    );
+    const data = await res.json();
+    const hit = data.results.find(r => r.previewUrl);
+    if (hit) {
+      _previewAudio = new Audio(hit.previewUrl);
+      _previewAudio.volume = 0.7;
+      _previewAudio.play();
+      document.getElementById('now-playing-title').textContent =
+        `${hit.trackName} — ${hit.artistName}`;
+      _previewAudio.onended = () => {
+        document.getElementById('now-playing').style.display = 'none';
+        _previewAudio = null;
+      };
+    } else {
+      document.getElementById('now-playing-title').textContent = 'No preview found';
+    }
+  } catch (_) {
+    document.getElementById('now-playing-title').textContent = 'iTunes unavailable';
+  }
+}
+
+/* ── Push-to-talk recorder ────────────────────────────────────────────────── */
+
+let audioCtx = null;
+let pttStream = null;
+let pttProcessor = null;
+let pttSamples = [];
+let pttRecording = false;
+let _muted = false;
+
+function encodeWAV(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const write = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+  write(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  write(8, 'WAVE');
+  write(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  write(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, samples[i] * 32768)), true);
+  }
+  return buf;
+}
+
+async function startRecording() {
+  pttSamples = [];
+  pttRecording = true;
+  document.getElementById('ptt-btn').classList.add('recording');
+  document.getElementById('ptt-icon').textContent = '⏹';
+  document.getElementById('agent-status-text').textContent = 'Recording…';
+
+  try {
+    const md = navigator.mediaDevices;
+    if (!md) throw new Error('mediaDevices unavailable — open http://localhost:8000');
+    pttStream = await md.getUserMedia({ audio: true });
+    audioCtx = new AudioContext({ sampleRate: 16000 });
+    const source = audioCtx.createMediaStreamSource(pttStream);
+    pttProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+    pttProcessor.onaudioprocess = (e) => {
+      if (!pttRecording) return;
+      const input = e.inputBuffer.getChannelData(0);
+      pttSamples.push(...input);
+    };
+    source.connect(pttProcessor);
+    pttProcessor.connect(audioCtx.destination);
+  } catch (err) {
+    console.error('Mic error:', err.message);
+    document.getElementById('agent-status-text').textContent = err.message.includes('mediaDevices') ? 'Use localhost:8000' : 'Mic denied — check browser settings';
+    _resetPtt();
+  }
+}
+
+function stopRecording() {
+  if (!pttRecording) return;
+  pttRecording = false;
+
+  if (pttProcessor) { pttProcessor.disconnect(); pttProcessor = null; }
+  if (pttStream)    { pttStream.getTracks().forEach(t => t.stop()); pttStream = null; }
+  if (audioCtx)     { audioCtx.close(); audioCtx = null; }
+
+  _resetPtt();
+
+  if (pttSamples.length < 3200) {
+    document.getElementById('agent-status-text').textContent = 'Listening…';
+    return;
+  }
+
+  const wav = encodeWAV(new Float32Array(pttSamples), 16000);
+  const bytes = new Uint8Array(wav);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  }
+  const b64 = btoa(binary);
+  send({ type: 'voice_input', audio: b64 });
+
+  setAgentDot('thinking');
+  document.getElementById('agent-status-text').textContent = 'Transcribing…';
+}
+
+function _resetPtt() {
+  document.getElementById('ptt-btn').classList.remove('recording');
+  document.getElementById('ptt-icon').textContent = '🎙';
 }
 
 /* ── WebSocket ────────────────────────────────────────────────────────────── */
@@ -257,9 +557,12 @@ function connect() {
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.type === 'signal')        onSignal(msg.data);
-    else if (msg.type === 'suggestion')  onSuggestion(msg.data);
+    if      (msg.type === 'signal')        onSignal(msg.data);
+    else if (msg.type === 'suggestion')    onSuggestion(msg.data);
     else if (msg.type === 'music_results') onMusicResults(msg.data);
+    else if (msg.type === 'transcript')    onTranscript(msg.data);
+    else if (msg.type === 'user_accept')   { document.getElementById('suggestion-card').style.display = 'none'; setAgentDot(''); }
+    else if (msg.type === 'user_dismiss')  dismissSuggestion();
   };
 }
 
@@ -296,6 +599,29 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('sug-dismiss-btn').addEventListener('click', dismissSuggestion);
+
+  // Pre-warm mic permission so the first click works immediately
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(s => s.getTracks().forEach(t => t.stop()))
+      .catch(() => {});
+  }
+
+  // Click-toggle: first click starts, second click stops
+  const pttBtn = document.getElementById('ptt-btn');
+  pttBtn.addEventListener('click', () => {
+    if (pttRecording) stopRecording();
+    else startRecording();
+  });
+
+  // Mute toggle
+  document.getElementById('mute-btn').addEventListener('click', () => {
+    _muted = !_muted;
+    const btn = document.getElementById('mute-btn');
+    btn.textContent = _muted ? '🔇' : '🔊';
+    btn.classList.toggle('muted', _muted);
+    send({ type: 'mute', muted: _muted });
+  });
 
   document.getElementById('music-btn').addEventListener('click', () => {
     const query = document.getElementById('music-input').value.trim();

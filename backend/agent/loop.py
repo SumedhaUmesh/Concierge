@@ -17,7 +17,7 @@ from signals import Signal, Suggestion
 
 log = logging.getLogger(__name__)
 
-GATE_INTERVAL_SEC = 8       # minimum seconds between gate checks
+GATE_INTERVAL_SEC = 3       # minimum seconds between gate checks
 COOLDOWN_SEC      = 180     # seconds of silence after a suggestion fires
 WINDOW_SIZE       = 3       # how many ticks to keep in the state window
 
@@ -84,7 +84,7 @@ class AgentLoop:
         mins_since_last = (now - self._last_suggestion_at) / 60.0
         mins_since_dismiss = (now - self._dismissed_at) / 60.0 if self._dismissed else 99.0
 
-        speak = await should_speak(
+        speak, trigger = await should_speak(
             state_window=self._window,
             last_suggestion_type=self._last_suggestion_type,
             minutes_since_last=mins_since_last,
@@ -95,7 +95,7 @@ class AgentLoop:
         if not speak:
             return
 
-        suggestion = await generate_suggestion(self._window)
+        suggestion = await generate_suggestion(self._window, trigger=trigger)
         if suggestion is None:
             return
 
