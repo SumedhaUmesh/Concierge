@@ -74,6 +74,28 @@ class AgentLoop:
         """Called when the driver accepts / acts on a suggestion."""
         log.info("Suggestion accepted")
 
+    def force_suggest(self, trigger: str) -> None:
+        """Bypass the gate and generate a suggestion immediately (e.g. voice request)."""
+        if self._running_task and not self._running_task.done():
+            return
+        self._running_task = asyncio.create_task(self._run_forced(trigger))
+
+    async def _run_forced(self, trigger: str) -> None:
+        if not self._window:
+            return
+        suggestion = await generate_suggestion(self._window, trigger=trigger)
+        if suggestion is None:
+            return
+        self._last_suggestion_at = time.monotonic()
+        self._last_suggestion_type = suggestion.type
+        self._dismissed = False
+        try:
+            result = self._on_suggestion(suggestion)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            log.exception("on_suggestion callback failed (forced)")
+
     # ── Internals ─────────────────────────────────────────────────────────────
 
     async def _run_inference(self) -> None:

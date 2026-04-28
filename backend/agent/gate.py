@@ -73,7 +73,17 @@ def _python_precheck(
         if last_type != "range":
             return True, "fuel critically low — suggest stopping for fuel (type=range)"
 
-    return None, None  # let the LLM handle meal / schedule / ambiguous cases
+    meal_hours = s.get("hours_since_meal", 0)
+    try:
+        hour = int(str(s.get("time", "0:00")).split(":")[0])
+        is_mealtime = (11 <= hour <= 14) or (17 <= hour <= 21)
+    except (ValueError, AttributeError):
+        is_mealtime = False
+    if meal_hours > 4 and is_mealtime:
+        if last_type != "meal":
+            return True, "driver hasn't eaten in 4+ hours during mealtime — suggest a nearby restaurant (type=meal)"
+
+    return None, None  # let the LLM handle schedule / ambiguous cases
 
 
 async def should_speak(

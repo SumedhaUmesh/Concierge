@@ -16,7 +16,7 @@ from agent import llm as llm_mod
 
 log = logging.getLogger(__name__)
 
-INTENTS = ("accept", "dismiss", "defer", "music", "query")
+INTENTS = ("accept", "dismiss", "defer", "music", "hungry", "query")
 
 _SYSTEM = """\
 Classify a driver's spoken response into one intent. Return exactly one word.
@@ -25,6 +25,7 @@ accept  — agrees or wants to act: "yes", "navigate there", "go", "okay", "do i
 dismiss — rejects: "no", "not now", "ignore", "cancel", "dismiss", "I'm fine"
 defer   — wants a reminder: "maybe later", "give me a minute", "remind me", "not yet"
 music   — music request: "play something", "I want music", "something chill", "put on jazz", "Hips don't lie by Shakira", "[song] by [artist]", any song or artist name
+hungry  — food request: "I'm hungry", "I need food", "find me a restaurant", "I want to eat", "starving"
 query   — question: "how far", "what time", "tell me more", "which exit"
 
 Reply with one word only."""
@@ -37,6 +38,7 @@ _KEYWORDS = {
     "dismiss": ["no", "not now", "cancel", "ignore", "dismiss", "nope", "stop", "fine"],
     "defer":   ["later", "minute", "remind", "maybe", "wait", "hold on"],
     "music":   ["music", "play", "song", "chill", "jazz", "rock", "something", "listen", "artist", "album", "track", "tune", "beat"],
+    "hungry":  ["hungry", "starving", "food", "eat", "eating", "lunch", "dinner", "breakfast", "restaurant", "snack", "meal"],
 }
 
 import re

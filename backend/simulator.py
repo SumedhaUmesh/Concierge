@@ -38,6 +38,14 @@ class Simulator:
     async def broadcast(self):
         if not self._clients:
             return
+        # Overlay real OBD-II readings on top of simulated state
+        try:
+            from obd_source import obd_source
+            for key, val in obd_source.read().items():
+                if not key.startswith("_") and hasattr(self.state, key):
+                    setattr(self.state, key, val)
+        except Exception:
+            pass
         payload = json.dumps({"type": "signal", "data": asdict(self.state)})
         dead: Set[Any] = set()
         for ws in self._clients:

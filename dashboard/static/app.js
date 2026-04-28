@@ -449,6 +449,42 @@ async function playITunesDirect(query) {
   }
 }
 
+function onMealOptions(data) {
+  const section = document.getElementById('music-section');
+  const list    = document.getElementById('music-tracks');
+  section.style.display = 'block';
+  list.innerHTML = '';
+
+  // Question header
+  const hdr = document.createElement('div');
+  hdr.className = 'section-label';
+  hdr.style.marginBottom = '6px';
+  hdr.textContent = '🍽 NEARBY RESTAURANTS';
+  list.appendChild(hdr);
+
+  data.pois.forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'music-track';
+    div.innerHTML = `
+      <div class="music-track-play">▶</div>
+      <div>
+        <div class="music-track-title">${p.name}</div>
+        <div class="music-track-meta">${p.cuisine || 'restaurant'} · ${p.distance_km} km</div>
+      </div>
+    `;
+    div.addEventListener('click', () => {
+      document.querySelectorAll('.music-track').forEach(el => el.classList.remove('playing'));
+      div.classList.add('playing');
+      if (p.lat && p.lng) {
+        const url = `https://maps.google.com/?q=${p.lat},${p.lng}`;
+        window.open(url, '_blank');
+      }
+      send({ type: 'user_accept' });
+    });
+    list.appendChild(div);
+  });
+}
+
 /* ── Push-to-talk recorder ────────────────────────────────────────────────── */
 
 let audioCtx = null;
@@ -560,6 +596,7 @@ function connect() {
     if      (msg.type === 'signal')        onSignal(msg.data);
     else if (msg.type === 'suggestion')    onSuggestion(msg.data);
     else if (msg.type === 'music_results') onMusicResults(msg.data);
+    else if (msg.type === 'meal_options')  onMealOptions(msg.data);
     else if (msg.type === 'transcript')    onTranscript(msg.data);
     else if (msg.type === 'user_accept')   { document.getElementById('suggestion-card').style.display = 'none'; setAgentDot(''); }
     else if (msg.type === 'user_dismiss')  dismissSuggestion();

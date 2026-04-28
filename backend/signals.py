@@ -20,10 +20,10 @@ class Signal:
     speed_kmh: float = 110.0
     is_on_highway: bool = True
 
-    # Position (default: 405 near Culver City)
-    lat: float = 34.0268
-    lng: float = -118.3964
-    location_label: str = "Highway 405, Los Angeles"
+    # Position (default: downtown Culver City)
+    lat: float = 34.0211
+    lng: float = -118.3965
+    location_label: str = "Downtown Culver City, CA"
 
     # Environment
     outside_temp_c: float = 18.0

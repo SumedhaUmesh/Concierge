@@ -1,29 +1,32 @@
 """
-Overpass API client for finding Points of Interest near a location.
+Nominatim (OpenStreetMap) client for finding Points of Interest near a location.
 
-Results are cached in-memory per (category, rounded lat/lon, radius)
-for the duration of the session to avoid redundant HTTP calls.
+Uses the /search endpoint with a bounding-box viewbox — no API key required.
+Results are cached in-memory per (category, rounded lat/lon) for the session.
 """
 
-import asyncio
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_HEADERS = {"User-Agent": "Concierge/1.0 (portfolio demo)"}
 
-# Maps category name → Overpass tag filters
-_CATEGORY_QUERIES = {
-    "fuel":      '[amenity=fuel]',
-    "food":      '[amenity~"restaurant|cafe|fast_food"]',
-    "rest":      '[highway=services]',
-    "ev_charge": '[amenity=charging_station]',
-    "service":   '[shop=car_repair]',
+# amenity= values for structured Nominatim search
+_CATEGORY_AMENITIES = {
+    "fuel":  ["fuel"],
+    "food":  ["restaurant", "cafe", "fast_food", "food_court", "ice_cream", "bar", "pub"],
+    "rest":  ["rest_area", "services"],
+}
+
+# Free-text q= terms added on top of amenity search (for shop= OSM tags)
+_CATEGORY_FREETEXT = {
+    "food": ["supermarket", "grocery store", "bakery", "convenience store"],
 }
 
 _cache: dict = {}
@@ -36,10 +39,10 @@ class POI:
     lat: float
     lng: float
     address: str
+    cuisine: str = ""
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Return distance in km between two WGS-84 points."""
     R = 6371.0
     dLat = math.radians(lat2 - lat1)
     dLon = math.radians(lon2 - lon1)
@@ -49,43 +52,11 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _cache_key(category: str, lat: float, lon: float, radius_km: float) -> tuple:
-    # Round to 2 decimal places (~1.1km grid) for cache hits
-    return (category, round(lat, 2), round(lon, 2), radius_km)
-
-
-def _build_query(category: str, lat: float, lon: float, radius_m: int) -> str:
-    tag = _CATEGORY_QUERIES.get(category, '[amenity=fuel]')
-    return f"""
-[out:json][timeout:10];
-(
-  node{tag}(around:{radius_m},{lat},{lon});
-  way{tag}(around:{radius_m},{lat},{lon});
-);
-out center 10;
-"""
-
-
-def _parse_element(elem: dict, car_lat: float, car_lon: float) -> Optional[POI]:
-    tags = elem.get("tags", {})
-    name = tags.get("name") or tags.get("brand") or tags.get("operator")
-    if not name:
-        return None
-
-    if elem["type"] == "node":
-        lat, lng = elem["lat"], elem["lon"]
-    else:
-        center = elem.get("center", {})
-        lat, lng = center.get("lat"), center.get("lon")
-        if lat is None:
-            return None
-
-    dist = _haversine(car_lat, car_lon, lat, lng)
-    street = tags.get("addr:street") or tags.get("addr:full") or ""
-    city = tags.get("addr:city") or ""
-    address = ", ".join(filter(None, [street, city])) or "on route"
-
-    return POI(name=name, distance_km=round(dist, 1), lat=lat, lng=lng, address=address)
+def _bbox(lat: float, lon: float, radius_km: float):
+    """Return (west, north, east, south) bounding box for Nominatim viewbox."""
+    delta_lat = radius_km / 111.0
+    delta_lon = radius_km / (111.0 * math.cos(math.radians(lat)))
+    return lon - delta_lon, lat + delta_lat, lon + delta_lon, lat - delta_lat
 
 
 async def find_poi(
@@ -95,32 +66,79 @@ async def find_poi(
     radius_km: float = 20.0,
     limit: int = 5,
 ) -> list[POI]:
-    """Return up to `limit` POIs of the given category sorted by distance."""
-    key = _cache_key(category, lat, lon, radius_km)
-    if key in _cache:
+    key = (category, round(lat, 2), round(lon, 2))
+    if key in _cache and _cache[key]:
         return _cache[key]
 
-    query = _build_query(category, lat, lon, int(radius_km * 1000))
+    amenities = _CATEGORY_AMENITIES.get(category, ["fuel"])
+    west, north, east, south = _bbox(lat, lon, radius_km)
+    viewbox = f"{west:.4f},{north:.4f},{east:.4f},{south:.4f}"
 
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=12)
-        ) as session:
-            async with session.post(OVERPASS_URL, data={"data": query}) as resp:
-                resp.raise_for_status()
-                data = await resp.json(content_type=None)
-    except Exception:
-        log.exception("Overpass request failed for category=%s", category)
-        return []
+    all_pois: list[POI] = []
 
-    pois: list[POI] = []
-    for elem in data.get("elements", []):
-        poi = _parse_element(elem, lat, lon)
-        if poi:
-            pois.append(poi)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10),
+        headers=NOMINATIM_HEADERS,
+    ) as session:
+        # Structured amenity searches
+        queries = [{"amenity": a, "format": "json", "limit": 30,
+                    "viewbox": viewbox, "bounded": 1, "extratags": 1, "namedetails": 1}
+                   for a in amenities]
+        # Free-text searches for shop= types (supermarket, grocery, bakery…)
+        for term in _CATEGORY_FREETEXT.get(category, []):
+            queries.append({"q": term, "format": "json", "limit": 15,
+                            "viewbox": viewbox, "bounded": 1, "extratags": 1, "namedetails": 1})
 
-    pois.sort(key=lambda p: p.distance_km)
-    result = pois[:limit]
-    _cache[key] = result
+        for params in queries:
+            try:
+                async with session.get(NOMINATIM_URL, params=params) as resp:
+                    resp.raise_for_status()
+                    results = await resp.json(content_type=None)
+
+                label = params.get("amenity") or params.get("q")
+                log.info("Nominatim[%s/%s]: %d results", category, label, len(results))
+
+                for r in results:
+                    name = r.get("namedetails", {}).get("name") or r.get("display_name", "").split(",")[0]
+                    if not name or len(name) < 2:
+                        continue
+                    try:
+                        poi_lat, poi_lon = float(r["lat"]), float(r["lon"])
+                    except (KeyError, ValueError):
+                        continue
+                    dist = _haversine(lat, lon, poi_lat, poi_lon)
+                    if dist > radius_km:
+                        continue
+                    extra = r.get("extratags") or {}
+                    cuisine = extra.get("cuisine", "").replace(";", ", ").replace("_", " ")
+                    # Use shop type as cuisine label when no cuisine tag
+                    if not cuisine:
+                        shop_type = extra.get("shop", "")
+                        if shop_type:
+                            cuisine = shop_type.replace("_", " ").title()
+                    address_parts = r.get("display_name", "").split(",")
+                    address = ", ".join(p.strip() for p in address_parts[1:3]) if len(address_parts) > 1 else ""
+                    all_pois.append(POI(
+                        name=name,
+                        distance_km=round(dist, 1),
+                        lat=poi_lat,
+                        lng=poi_lon,
+                        address=address,
+                        cuisine=cuisine,
+                    ))
+            except Exception as exc:
+                log.warning("Nominatim request failed for %s: %s", params.get("amenity") or params.get("q"), exc)
+
+    all_pois.sort(key=lambda p: p.distance_km)
+    # Deduplicate by name
+    seen: set[str] = set()
+    unique: list[POI] = []
+    for p in all_pois:
+        if p.name not in seen:
+            seen.add(p.name)
+            unique.append(p)
+
+    result = unique[:limit * 2]  # keep more for preference matching
     log.info("POI[%s] found %d results near (%.3f,%.3f)", category, len(result), lat, lon)
+    _cache[key] = result
     return result
