@@ -15,7 +15,7 @@ from obd_source import obd_source
 from tool_router import enrich
 from agent import music as music_mod
 from agent.voice import tts, asr, classifier
-from agent import llm as llm_mod
+from agent import llm as llm_mod, cloud as cloud_mod
 from agent.prompts import VEHICLE_QA_SYSTEM, VEHICLE_QA_USER
 import trip_memory
 
@@ -322,28 +322,49 @@ async def _handle_meal_preference(
 
 
 async def _handle_query(websocket: WebSocket, question: str, state) -> None:
-    """Answer a driver's spoken question using streaming LLM → sentence-by-sentence TTS."""
+    """
+    Answer a driver's spoken question.
+    Tries local LFM first; escalates to Claude Haiku if the answer is too
+    short or hedging — mirrors MB × Liquid AI 'complements cloud LLMs'.
+    """
     from dataclasses import asdict
     compact = {k: v for k, v in asdict(state).items()
                if v is not None and v != 0 and k not in ("is_on_highway",)}
     state_json = json.dumps(compact, indent=2)
 
+    # ── Local attempt ────────────────────────────────────────────────────────
     messages = [
         {"role": "system", "content": VEHICLE_QA_SYSTEM},
         {"role": "user", "content": VEHICLE_QA_USER.format(
             state_json=state_json, question=question,
         )},
     ]
+    local_answer = await llm_mod.complete(messages, max_tokens=120, temperature=0.3)
+    local_answer = (local_answer or "").strip()
 
-    token_gen = llm_mod.stream_complete(messages, max_tokens=120, temperature=0.3)
-    answer = await tts.speak_stream(token_gen)
-
-    log.info("Q&A: %r → %r", question[:40], answer[:80])
+    if not cloud_mod.needs_cloud(local_answer):
+        log.info("Q&A [local]: %r → %r", question[:40], local_answer[:80])
+        asyncio.create_task(tts.speak(local_answer))
+        source = "⚡ local"
+        answer = local_answer
+    else:
+        # ── Cloud escalation ─────────────────────────────────────────────────
+        log.info("Q&A [escalating to cloud]: local=%r", local_answer[:40])
+        token_gen = await cloud_mod.stream_answer(question, state_json)
+        if token_gen:
+            answer = await tts.speak_stream(token_gen)
+            source = "☁ cloud"
+            log.info("Q&A [cloud]: %r → %r", question[:40], answer[:80])
+        else:
+            # Cloud unavailable — use local answer however weak
+            asyncio.create_task(tts.speak(local_answer or "I'm not sure about that."))
+            answer = local_answer or "I'm not sure about that."
+            source = "⚡ local"
 
     try:
         await websocket.send_text(json.dumps({
             "type": "transcript",
-            "data": {"text": f"A: {answer.strip()}"},
+            "data": {"text": f"{source}  {answer.strip()}"},
         }))
     except Exception:
         pass

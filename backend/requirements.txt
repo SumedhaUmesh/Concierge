@@ -3,3 +3,4 @@ uvicorn[standard]==0.30.6
 llama-cpp-python==0.3.21
 aiohttp==3.13.5
 huggingface_hub==1.12.0
+anthropic>=0.40.0
