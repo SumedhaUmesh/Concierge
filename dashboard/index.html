@@ -69,6 +69,26 @@
 
     <div class="sidebar">
 
+      <!-- Cognitive Driver Model -->
+      <div class="section-label" style="margin-bottom:6px">DRIVER STATE</div>
+      <div class="driver-state-row">
+        <div class="ds-bar-wrap" title="Fatigue">
+          <div class="ds-label">FATIGUE</div>
+          <div class="ds-bar"><div class="ds-fill" id="ds-fatigue"></div></div>
+        </div>
+        <div class="ds-bar-wrap" title="Cognitive Load">
+          <div class="ds-label">LOAD</div>
+          <div class="ds-bar"><div class="ds-fill" id="ds-load"></div></div>
+        </div>
+        <div class="ds-bar-wrap" title="Stress">
+          <div class="ds-label">STRESS</div>
+          <div class="ds-bar"><div class="ds-fill" id="ds-stress"></div></div>
+        </div>
+        <div class="ds-risk" id="ds-risk">LOW</div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
       <!-- Agent suggestion panel -->
       <div id="agent-section">
         <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
@@ -106,9 +126,9 @@
       <div id="music-section" style="display:none">
         <div class="section-label" style="margin-top:14px">MUSIC</div>
         <div id="now-playing" style="display:none" class="now-playing-bar">
-          <span id="now-playing-icon">▶</span>
+          <button id="pause-btn" class="stop-btn" onclick="togglePause()" title="Pause / Resume">⏸</button>
           <span id="now-playing-title"></span>
-          <button id="stop-btn" class="stop-btn" onclick="stopTrack()">■</button>
+          <button class="stop-btn" onclick="stopTrack()" title="Stop">■</button>
         </div>
         <div id="music-tracks" class="music-list"></div>
       </div>
@@ -170,22 +190,7 @@
         </div>
       </div>
 
-      <!-- Scenarios -->
-      <div class="section-label" style="margin-top:20px">SCENARIOS</div>
-      <div class="scenario-btns">
-        <button data-scenario="quiet">Quiet</button>
-        <button data-scenario="range_critical">Range</button>
-        <button data-scenario="meal">Meal</button>
-        <button data-scenario="cabin">Cabin</button>
-        <button data-scenario="schedule">Schedule</button>
-      </div>
 
-      <!-- Music query input -->
-      <div class="section-label" style="margin-top:14px">ASK FOR MUSIC</div>
-      <div class="music-input-row">
-        <input id="music-input" class="music-input" type="text" placeholder="something chill for the highway…" />
-        <button id="music-btn" class="music-btn">Go</button>
-      </div>
 
     </div>
   </div>
@@ -194,8 +199,6 @@
   <div class="statusbar">
     <span class="status-dot" id="status-dot"></span>
     <span id="status-label">connecting…</span>
-    <span class="statusbar-sep">·</span>
-    <span id="scenario-label">—</span>
     <span class="statusbar-sep">·</span>
     <span id="agent-stats-label" style="color: var(--dim); font-size:10px">model loading…</span>
     <span class="statusbar-sep">·</span>

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from simulator import Simulator
@@ -18,6 +18,9 @@ from agent import music as music_mod
 from agent.voice import tts, asr, classifier
 from agent import llm as llm_mod, cloud as cloud_mod
 from agent.prompts import VEHICLE_QA_SYSTEM, VEHICLE_QA_USER
+from agent.intent_engine import decompose as decompose_intents
+from agent.orchestrator import orchestrate, fallback_clarify
+from agent.conversation import ConversationBuffer
 import trip_memory
 import calendar_source
 
@@ -37,18 +40,22 @@ async def root():
     return FileResponse(str(DASHBOARD / "index.html"))
 
 
-@app.get("/demo", response_class=HTMLResponse)
-async def demo_panel():
-    return HTMLResponse(_DEMO_HTML)
-
-
-@app.post("/demo/state")
-async def demo_set_state(body: dict):
+@app.post("/sim/state")
+async def sim_set_state(body: dict):
+    """Set any simulator state field(s) and broadcast to all clients."""
     for key, value in body.items():
         if hasattr(sim.state, key):
             setattr(sim.state, key, value)
     await sim.broadcast()
-    return {"ok": True, "state": asdict(sim.state)}
+    return {"ok": True}
+
+
+@app.post("/agent/reset")
+async def agent_reset():
+    """Reset cooldown on all active agent loops so the next gate tick can fire immediately."""
+    for agent in sim._agents:
+        agent.reset_cooldown()
+    return {"ok": True, "agents_reset": len(sim._agents)}
 
 
 @app.post("/obd/connect")
@@ -112,12 +119,13 @@ async def reverse_geocode(lat: float, lng: float):
 
 @app.get("/memory/stats")
 async def memory_stats():
-    return trip_memory.get_preferences()
+    prefs = trip_memory.get_preferences()
+    thresholds = trip_memory.get_adaptive_thresholds()
+    return {**prefs, "adaptive_thresholds": thresholds}
 
 
 @app.delete("/memory/reset")
 async def memory_reset():
-    import sqlite3 as _sq
     with trip_memory._lock:
         conn = trip_memory._get_conn()
         conn.execute("DELETE FROM suggestions")
@@ -125,12 +133,72 @@ async def memory_reset():
     return {"ok": True}
 
 
+@app.get("/privacy")
+async def privacy_report():
+    """Privacy-Aware AI: show exactly what is stored and where it goes."""
+    prefs = trip_memory.get_preferences()
+    return {
+        "storage": "local SQLite (backend/trip_memory.db) — never uploaded",
+        "what_is_stored": [
+            "suggestion type and headline",
+            "accepted/dismissed outcome",
+            "place name and GPS coordinates (when navigating)",
+            "hour of day and day of week",
+            "cuisine type (for meal suggestions)",
+        ],
+        "what_is_NOT_stored": [
+            "your voice audio (discarded after transcription)",
+            "full trip routes",
+            "personal identity",
+        ],
+        "cloud_calls": [
+            "Nominatim reverse geocoding (your GPS coords, no account required)",
+            "Open-Meteo weather (your GPS coords, no account required)",
+            "OSRM routing (start+end coords, no account required)",
+            "Overpass API POI search (bounding box, no account required)",
+            "Claude Haiku (only if local LLM answer is too short, requires ANTHROPIC_API_KEY)",
+        ],
+        "on_device": [
+            "LFM2.5-1.2B GGUF — all suggestion generation runs locally",
+            "Whisper ASR — voice transcription runs locally",
+            "macOS TTS — speech synthesis runs locally",
+            "macOS Calendar — read via AppleScript, never leaves device",
+        ],
+        "total_logged_outcomes": prefs["total_logged"],
+        "clear_with": "DELETE /memory/reset",
+    }
+
+
+@app.get("/driver/state")
+async def driver_state():
+    """Cognitive Driver Model: current computed driver state."""
+    from agent.driver_model import compute  # noqa: PLC0415
+    ds = compute(sim.state)
+    return {
+        "fatigue_index": ds.fatigue_index,
+        "cognitive_load": ds.cognitive_load,
+        "stress_index": ds.stress_index,
+        "risk_level": ds.risk_level,
+        "minutes_driving": round(sim.state.minutes_driving_continuously),
+        "adaptive_cooldown_sec": None,  # filled from agent loop if needed
+    }
+
+
 @app.on_event("startup")
 async def _warmup():
     from agent.llm import get_llm  # noqa: PLC0415
     await asyncio.to_thread(get_llm)
     tts.init()
+    asyncio.create_task(_broadcast_loop())
     asyncio.create_task(_calendar_sync_loop())
+    asyncio.create_task(_weather_loop())
+
+
+async def _broadcast_loop():
+    """Emit state to all clients every 1.5 s — keeps gauges, bars, and cabin live."""
+    while True:
+        await sim.broadcast()
+        await asyncio.sleep(1.5)
 
 
 async def _calendar_sync_loop():
@@ -153,6 +221,31 @@ async def _do_calendar_sync() -> Optional[dict]:
     return event
 
 
+async def _weather_loop():
+    """Poll Open-Meteo every 10 min and update rain_in_minutes from real forecast."""
+    while True:
+        await _do_weather_update()
+        await asyncio.sleep(600)
+
+
+async def _do_weather_update():
+    # Skip if the simulator has scenario-controlled rain
+    if sim._scenario_time_frozen:
+        return
+    try:
+        from agent.tools.weather import get_forecast  # noqa: PLC0415
+        fc = await get_forecast(sim.state.lat, sim.state.lng)
+        if fc is None:
+            return
+        if fc.rain_in_hours is not None:
+            sim.state.rain_in_minutes = max(1, int(fc.rain_in_hours * 60))
+            log.info("Weather: rain expected in %d min", sim.state.rain_in_minutes)
+        else:
+            sim.state.rain_in_minutes = None
+    except Exception:
+        log.exception("Weather update failed")
+
+
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -166,6 +259,8 @@ async def ws_endpoint(websocket: WebSocket):
     latest_suggestion: list[Suggestion] = []
     # Two-turn meal flow: store POIs after "hungry" until preference is spoken
     pending_meal_pois: list = []
+    # Per-session conversation buffer (conversational continuity)
+    convo = ConversationBuffer()
 
     async def _on_suggestion(suggestion: Suggestion):
         try:
@@ -194,9 +289,7 @@ async def ws_endpoint(websocket: WebSocket):
             msg = json.loads(raw)
             kind = msg.get("type")
 
-            if kind == "play":
-                await sim.play(msg["scenario"])
-            elif kind == "reset":
+            if kind == "reset":
                 await sim.reset()
             elif kind == "gps_update":
                 sim.state.lat = msg["lat"]
@@ -209,15 +302,27 @@ async def ws_endpoint(websocket: WebSocket):
                     trip_memory.log_outcome(latest_suggestion[0], "dismissed", sim.state)
             elif kind == "user_accept":
                 agent.accept()
+                # Apply cabin state changes immediately
+                cabin_action = msg.get("action")
+                if cabin_action in ("close_windows", "close_windows_ac"):
+                    sim.state.windows_open = False
+                    sim.state.sunroof_open = False
+                    sim.state.ac_on        = True
+                    sim.state.rain_in_minutes = None
+                elif cabin_action == "turn_on_ac":
+                    sim.state.ac_on = True
+                elif cabin_action == "open_windows":
+                    sim.state.windows_open = True
                 if latest_suggestion:
                     trip_memory.log_outcome(latest_suggestion[0], "accepted", sim.state)
+                await sim.broadcast()
             elif kind == "mute":
                 tts.set_muted(msg.get("muted", False))
             elif kind == "music_query":
                 asyncio.create_task(_handle_music(websocket, msg.get("query", "")))
             elif kind == "voice_input":
                 asyncio.create_task(
-                    _handle_voice(websocket, agent, latest_suggestion, pending_meal_pois, _on_suggestion, msg.get("audio", ""))
+                    _handle_voice(websocket, agent, latest_suggestion, pending_meal_pois, _on_suggestion, convo, msg.get("audio", ""))
                 )
     except WebSocketDisconnect:
         sim.remove_client(websocket)
@@ -230,11 +335,14 @@ async def _handle_voice(
     latest_suggestion: list,
     pending_meal_pois: list,
     on_suggestion,
+    convo: ConversationBuffer,
     audio_b64: str,
 ):
     transcript = await asr.transcribe(audio_b64)
     if not transcript:
         return
+
+    convo.add_user(transcript)
 
     try:
         await websocket.send_text(json.dumps({
@@ -244,7 +352,7 @@ async def _handle_voice(
     except Exception:
         pass
 
-    # If we're mid meal-preference flow, handle that before normal routing
+    # Mid meal-preference flow takes priority
     if pending_meal_pois:
         await _handle_meal_preference(websocket, pending_meal_pois, transcript, on_suggestion)
         return
@@ -265,18 +373,15 @@ async def _handle_voice(
         except Exception:
             pass
 
-    elif intent == "hungry":
-        asyncio.create_task(_handle_hungry(websocket, agent, pending_meal_pois, sim.state))
-
-    elif intent == "music":
-        await _handle_music(websocket, transcript)
-
     elif intent == "defer":
         agent.dismiss()
         asyncio.create_task(tts.speak("Got it. I'll check back in a few minutes."))
 
-    elif intent == "query":
-        asyncio.create_task(_handle_query(websocket, transcript, sim.state))
+    else:
+        # All other inputs — natural language, vague, emotional, compound — go to orchestrator
+        asyncio.create_task(
+            _handle_orchestrated(websocket, agent, pending_meal_pois, on_suggestion, convo, transcript)
+        )
 
 
 async def _handle_hungry(
@@ -389,6 +494,339 @@ async def _handle_meal_preference(
     await on_suggestion(suggestion)
 
 
+# ── Emotional fast-path — no LLM needed ──────────────────────────────────────
+# Maps keyword groups → pre-built action plans executed without any LLM call.
+# This ensures reliable, instant response for the most common emotional states.
+_EMOTIONAL_FAST_PATHS = [
+    (
+        {"tired", "sleepy", "exhausted", "drowsy", "fatigue", "fatigued"},
+        {
+            "reply":   "You sound tired. I'll cool things down a little and put on something calm.",
+            "actions": [
+                {"type": "cabin_temp", "celsius": 19},
+                {"type": "music",      "mood": "calm",   "energy": 3},
+                {"type": "reduce_alerts", "minutes": 20},
+            ],
+        },
+    ),
+    (
+        {"stressed", "anxious", "nervous", "worried", "edge", "tense"},
+        {
+            "reply":   "Let me help you unwind — calm music and a comfortable temperature.",
+            "actions": [
+                {"type": "cabin_temp", "celsius": 21},
+                {"type": "music",      "mood": "calm relaxed", "energy": 2},
+                {"type": "reduce_alerts", "minutes": 15},
+            ],
+        },
+    ),
+    (
+        {"energetic", "pumped", "awake", "alert", "excited", "motivated"},
+        {
+            "reply":   "Let's go! Bringing up the energy.",
+            "actions": [
+                {"type": "cabin_temp", "celsius": 20},
+                {"type": "music",      "mood": "energetic upbeat", "energy": 8},
+            ],
+        },
+    ),
+    (
+        {"relaxed", "relaxing", "chill", "chilled", "peaceful", "mellow"},
+        {
+            "reply":   "Perfect. I'll keep things smooth and comfortable.",
+            "actions": [
+                {"type": "cabin_temp", "celsius": 21},
+                {"type": "music",      "mood": "relaxed smooth", "energy": 3},
+            ],
+        },
+    ),
+    (
+        {"bored", "boring"},
+        {
+            "reply":   "Let me liven things up a bit.",
+            "actions": [
+                {"type": "music", "mood": "upbeat groovy", "energy": 7},
+            ],
+        },
+    ),
+    (
+        {"hot", "warm", "sweating", "stuffy"},
+        {
+            "reply":   "I'll cool the cabin down for you.",
+            "actions": [
+                {"type": "cabin_temp", "celsius": 18},
+                {"type": "ac", "on": True},
+            ],
+        },
+    ),
+    (
+        {"cold", "freezing", "chilly", "shivering"},
+        {
+            "reply":   "I'll warm things up.",
+            "actions": [
+                {"type": "cabin_temp", "celsius": 24},
+                {"type": "ac", "on": True},
+            ],
+        },
+    ),
+]
+
+
+def _emotional_fast_path(transcript: str) -> Optional[dict]:
+    """Return a pre-built plan if the transcript matches an emotional keyword, else None."""
+    # Strip punctuation so "tired." and "tired!" both match "tired"
+    lower = set(w.strip(".,!?;:'\"") for w in transcript.lower().split())
+    for keywords, plan in _EMOTIONAL_FAST_PATHS:
+        if lower & keywords:
+            matched = lower & keywords
+            log.info("Emotional fast-path: matched %s in %r", matched, transcript[:40])
+            return plan
+    return None
+
+
+async def _handle_orchestrated(
+    websocket: WebSocket,
+    agent: AgentLoop,
+    pending_meal_pois: list,
+    on_suggestion,
+    convo: ConversationBuffer,
+    transcript: str,
+) -> None:
+    """
+    Natural language orchestration: routes any non-control utterance through
+    the LLM orchestrator which understands vague/emotional/indirect language
+    and returns a coordinated multi-action plan.
+    """
+    import json as _json
+    from dataclasses import asdict as _asdict
+
+    # Fast path: emotional states are handled instantly without any LLM call
+    fast_plan = _emotional_fast_path(transcript)
+    if fast_plan:
+        log.info("Orchestrator: emotional fast-path for %r", transcript[:40])
+        await _execute_plan(websocket, agent, pending_meal_pois, on_suggestion, convo,
+                            fast_plan, transcript)
+        return
+
+    # Intent Decomposition Engine — handle compound/scenic requests without LLM
+    intents = decompose_intents(transcript)
+    from agent.intent_engine import describe as _describe_intents  # noqa: PLC0415
+    if intents:
+        log.info("Intents decomposed: %s ← %r", _describe_intents(intents), transcript[:40])
+    nav_intent = next((i for i in intents if i.type == "navigate"), None)
+    if nav_intent and nav_intent.modifiers.get("scenic"):
+        scenic_plan = {
+            "reply": "I'll find you a scenic route. It may take a bit longer, but the views will be worth it.",
+            "actions": [
+                {"type": "music", "mood": "warm calm", "energy": 3},
+                {"type": "reduce_alerts", "minutes": 20},
+            ],
+        }
+        log.info("Orchestrator: scenic route fast-path")
+        await _execute_plan(websocket, agent, pending_meal_pois, on_suggestion, convo,
+                            scenic_plan, transcript)
+        asyncio.create_task(tts.speak(scenic_plan["reply"]))
+        return
+    elif nav_intent and nav_intent.modifiers.get("fast"):
+        fast_nav_plan = {
+            "reply": "Got it — I'll keep you on the fastest route.",
+            "actions": [{"type": "reduce_alerts", "minutes": 10}],
+        }
+        await _execute_plan(websocket, agent, pending_meal_pois, on_suggestion, convo,
+                            fast_nav_plan, transcript)
+        return
+
+    # Resolve references ("make it closer") using conversation history
+    resolved = convo.resolve(transcript)
+
+    # Build context
+    state_json  = _json.dumps(_asdict(sim.state), default=str)[:600]
+    conv_ctx    = convo.context_str()
+    pref_ctx    = trip_memory.get_context_string() or ""
+
+    plan = await orchestrate(resolved, state_json, conv_ctx, pref_ctx)
+
+    if plan is None:
+        # Graceful failure — smart clarifying question, not "I don't understand"
+        question = fallback_clarify(transcript)
+        convo.add_assistant(question)
+        asyncio.create_task(tts.speak(question))
+        return
+
+    confidence = plan.get("confidence", "high")
+    clarify    = plan.get("clarify")
+
+    # If low confidence, ask smart question instead of guessing wrong
+    if confidence == "low" and clarify:
+        convo.add_assistant(clarify)
+        asyncio.create_task(tts.speak(clarify))
+        return
+
+    await _execute_plan(websocket, agent, pending_meal_pois, on_suggestion, convo,
+                        plan, transcript)
+
+
+def _normalize_action(action: dict) -> dict:
+    """
+    The small LLM sometimes returns {"action": "play calming music"} instead of
+    {"type": "music", "mood": "calm", "energy": 3}. This maps both formats to the
+    canonical type-keyed form so _execute_plan always works correctly.
+    """
+    if action.get("type") in ("cabin_temp", "music", "find_poi", "navigate",
+                               "reduce_alerts", "windows", "ac"):
+        return action  # already canonical
+
+    raw = (action.get("action") or action.get("type") or "").lower()
+
+    if any(w in raw for w in ("music", "song", "play", "audio", "track")):
+        mood   = str(action.get("mood") or action.get("genre") or "calm")
+        energy = action.get("energy") or action.get("level") or 4
+        return {"type": "music", "mood": mood, "energy": int(energy)}
+
+    if any(w in raw for w in ("cabin", "temperature", "temp", "cool", "warm", "heat", "degree")):
+        celsius = action.get("celsius") or action.get("value") or action.get("temperature") or 21
+        return {"type": "cabin_temp", "celsius": float(celsius)}
+
+    if any(w in raw for w in ("window", "sunroof")):
+        return {"type": "windows", "open": bool(action.get("open", False))}
+
+    if any(w in raw for w in ("ac ", "air condition", "air-condition", "hvac")):
+        return {"type": "ac", "on": bool(action.get("on", True))}
+
+    if any(w in raw for w in ("alert", "interrupt", "notification", "quiet", "distract", "mute")):
+        return {"type": "reduce_alerts", "minutes": float(action.get("minutes", 15))}
+
+    if any(w in raw for w in ("navigate", "route", "direction", "go to", "head to")):
+        return {"type": "navigate", "destination": str(action.get("destination", ""))}
+
+    if any(w in raw for w in ("food", "restaurant", "eat", "hungry", "meal", "coffee")):
+        return {"type": "find_poi", "category": "food"}
+
+    if any(w in raw for w in ("gas", "fuel", "station")):
+        return {"type": "find_poi", "category": "fuel"}
+
+    log.debug("Unknown action format — skipping: %s", action)
+    return {}  # unknown — skip
+
+
+async def _execute_plan(
+    websocket: WebSocket,
+    agent: AgentLoop,
+    pending_meal_pois: list,
+    on_suggestion,
+    convo: ConversationBuffer,
+    plan: dict,
+    original_transcript: str,
+) -> None:
+    """Execute a resolved action plan (from LLM orchestrator or emotional fast-path)."""
+    reply   = plan.get("reply", "")
+    actions = [_normalize_action(a) for a in plan.get("actions", []) if isinstance(a, dict)]
+
+    log.info("Execute plan: reply=%r actions=%s",
+             reply[:50] if reply else "", [a.get("type") for a in actions])
+
+    if reply:
+        convo.add_assistant(reply, actions=actions)
+        asyncio.create_task(tts.speak(reply))
+
+    for action in actions:
+        atype = action.get("type")
+        if not atype:
+            continue
+        log.info("Action: %s %s", atype, {k: v for k, v in action.items() if k != "type"})
+
+        if atype == "cabin_temp":
+            sim.state.cabin_temp_c  = float(action.get("celsius", sim.state.cabin_temp_c))
+            sim.state.target_temp_c = sim.state.cabin_temp_c
+            sim.state.ac_on = True
+
+        elif atype == "music":
+            mood   = action.get("mood", "calm")
+            energy = int(action.get("energy", 5))
+            tracks = music_mod.quick_match(mood, energy)
+            log.info("Music: sending %d tracks for mood=%r energy=%d", len(tracks), mood, energy)
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "music_results",
+                    "data": {"query": mood, "tracks": tracks},
+                }))
+            except Exception:
+                log.exception("Music send failed")
+
+        elif atype == "find_poi":
+            category = action.get("category", "food")
+            asyncio.create_task(
+                _handle_hungry(websocket, agent, pending_meal_pois, sim.state)
+                if category == "food"
+                else _find_and_suggest(websocket, on_suggestion, category, sim.state)
+            )
+
+        elif atype == "navigate":
+            destination = action.get("destination", "")
+            log.info("Orchestrator: navigate to %r", destination)
+            asyncio.create_task(tts.speak(f"Setting navigation to {destination}."))
+
+        elif atype == "reduce_alerts":
+            agent.suppress(float(action.get("minutes", 15)))
+
+        elif atype == "windows":
+            sim.state.windows_open = bool(action.get("open", False))
+            sim.state.sunroof_open = bool(action.get("open", False))
+
+        elif atype == "ac":
+            sim.state.ac_on = bool(action.get("on", True))
+
+    await sim.broadcast()
+
+
+async def _find_and_suggest(websocket: WebSocket, on_suggestion, category: str, state) -> None:
+    """Find a non-food POI and push it as a suggestion (rest stop, gas, etc.)."""
+    poi_map = {"rest": "rest", "gas": "fuel", "coffee": "food", "scenic": "rest"}
+    trigger_map = {
+        "rest":   "driver requested a rest stop — suggest one nearby (type=rest)",
+        "fuel":   "driver asked about fuel — suggest the nearest station (type=range)",
+        "food":   "driver wants coffee or a quick stop — suggest a café (type=meal)",
+    }
+    poi_type = poi_map.get(category, "rest")
+    trigger  = trigger_map.get(poi_type, f"driver requested {category} stop (type=rest)")
+    from agent.loop import AgentLoop  # noqa: PLC0415
+    # Force-generate a suggestion for this trigger
+    from agent.generator import generate_suggestion  # noqa: PLC0415
+    from agent.loop import AgentLoop as _AL  # noqa: PLC0415
+    suggestion = await generate_suggestion([state], trigger=trigger)
+    if suggestion:
+        await on_suggestion(suggestion)
+
+
+async def _handle_compound_intents(
+    websocket: WebSocket,
+    agent: AgentLoop,
+    pending_meal_pois: list,
+    sub_intents,
+    raw: str,
+) -> None:
+    """
+    Intent Decomposition Engine — execute multiple intents from one utterance in priority order.
+    Example: "I'm hungry and need gas" fires fuel check first, then meal search.
+    """
+    acknowledged = [i.type for i in sub_intents]
+    ack_text = " and ".join(acknowledged[:2])
+    asyncio.create_task(tts.speak(f"Got it — I'll handle {ack_text} for you."))
+
+    for intent in sub_intents:
+        if intent.type == "fuel":
+            agent.force_suggest("fuel critically low — suggest stopping for fuel (type=range)")
+        elif intent.type in ("meal", "hungry"):
+            asyncio.create_task(_handle_hungry(websocket, agent, pending_meal_pois, sim.state))
+        elif intent.type == "rest":
+            agent.force_suggest("driver requested a rest stop (type=rest)")
+        elif intent.type == "music":
+            await _handle_music(websocket, raw)
+        elif intent.type == "query":
+            asyncio.create_task(_handle_query(websocket, raw, sim.state))
+        await asyncio.sleep(0.3)   # slight stagger so TTS doesn't overlap
+
+
 async def _handle_query(websocket: WebSocket, question: str, state) -> None:
     """
     Answer a driver's spoken question.
@@ -450,244 +888,3 @@ async def _handle_music(websocket: WebSocket, query: str):
     except Exception:
         pass
 
-
-# ── Demo control panel HTML ───────────────────────────────────────────────────
-
-_DEMO_HTML = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Concierge — Demo Controls</title>
-<style>
-  body { font-family: monospace; background: #0d0d0d; color: #ccc; padding: 32px; max-width: 640px; }
-  h1 { color: #4ade80; font-size: 16px; letter-spacing: 2px; margin-bottom: 24px; }
-  h2 { color: #888; font-size: 11px; letter-spacing: 1px; margin: 20px 0 8px; text-transform: uppercase; }
-  label { display: flex; justify-content: space-between; align-items: center; margin: 6px 0; font-size: 12px; }
-  label span { color: #888; min-width: 160px; }
-  input[type=range] { flex: 1; margin: 0 12px; accent-color: #4ade80; }
-  input[type=text], input[type=number] { background: #1a1a1a; border: 1px solid #333; color: #ccc; padding: 4px 8px; border-radius: 4px; width: 160px; font-family: monospace; font-size: 12px; }
-  .val { min-width: 40px; text-align: right; color: #4ade80; }
-  .toggle { display: flex; gap: 8px; }
-  .toggle button { background: #1a1a1a; border: 1px solid #333; color: #888; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 11px; }
-  .toggle button.on { background: #0d1a0d; border-color: #4ade80; color: #4ade80; }
-  .preset-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
-  .preset { background: #1a1a1a; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: monospace; }
-  .preset:hover { border-color: #4ade80; color: #4ade80; }
-  button#apply { background: #4ade80; color: #000; border: none; padding: 10px 28px; border-radius: 6px; cursor: pointer; font-family: monospace; font-size: 13px; font-weight: bold; margin-top: 20px; width: 100%; }
-  #status { margin-top: 12px; font-size: 11px; color: #888; min-height: 16px; }
-</style>
-</head>
-<body>
-<h1>CONCIERGE — DEMO CONTROLS</h1>
-
-<h2>Calendar</h2>
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-  <button class="preset" onclick="syncCalendar()">Sync Now</button>
-  <span id="cal_status" style="font-size:11px;color:#888">Not synced</span>
-</div>
-
-<h2>OBD-II Live Data</h2>
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-  <input type="text" id="obd_port" placeholder="/dev/cu.OBDII (blank=auto)" style="flex:1">
-  <button class="preset" onclick="obdConnect()">Connect</button>
-  <button class="preset" onclick="obdDisconnect()">Disconnect</button>
-</div>
-<div id="obd_status" style="font-size:11px;color:#888;margin-bottom:12px">Not connected — simulator data in use</div>
-
-<h2>Quick Presets</h2>
-<div class="preset-row">
-  <button class="preset" onclick="applyPreset('low_fuel')">Low Fuel</button>
-  <button class="preset" onclick="applyPreset('rain_open')">Rain + Windows Open</button>
-  <button class="preset" onclick="applyPreset('hungry')">Hungry at Lunch</button>
-  <button class="preset" onclick="applyPreset('late_meeting')">Late for Meeting</button>
-  <button class="preset" onclick="applyPreset('normal')">Normal Drive</button>
-</div>
-
-<h2>Vehicle</h2>
-<label><span>Fuel %</span><input type="range" id="fuel_percent" min="0" max="100" value="65" oninput="this.nextElementSibling.textContent=this.value"><span class="val">65</span></label>
-<label><span>Range km</span><input type="range" id="range_km" min="0" max="600" value="280" oninput="this.nextElementSibling.textContent=this.value"><span class="val">280</span></label>
-<label><span>Speed km/h</span><input type="range" id="speed_kmh" min="0" max="200" value="110" oninput="this.nextElementSibling.textContent=this.value"><span class="val">110</span></label>
-
-<h2>Location</h2>
-<label><span>Latitude</span><input type="text" id="lat" value="34.0211"></label>
-<label><span>Longitude</span><input type="text" id="lng" value="-118.3965"></label>
-<label><span>Label</span><input type="text" id="location_label" value="Downtown Culver City, CA"></label>
-<div class="preset-row">
-  <button class="preset" onclick="setLocation(34.0211,-118.3965,'Downtown Culver City, CA')">Culver City</button>
-  <button class="preset" onclick="setLocation(34.0522,-118.2437,'Downtown Los Angeles, CA')">Downtown LA</button>
-  <button class="preset" onclick="setLocation(34.1478,-118.1445,'Pasadena, CA')">Pasadena</button>
-  <button class="preset" onclick="setLocation(34.0195,-118.4912,'Santa Monica, CA')">Santa Monica</button>
-</div>
-
-<h2>Cabin</h2>
-<label><span>Windows Open</span><div class="toggle"><button id="windows_open_btn" onclick="toggleBool('windows_open')">Closed</button></div></label>
-<label><span>Sunroof Open</span><div class="toggle"><button id="sunroof_open_btn" onclick="toggleBool('sunroof_open')">Closed</button></div></label>
-<label><span>AC On</span><div class="toggle"><button id="ac_on_btn" onclick="toggleBool('ac_on')">Off</button></div></label>
-<label><span>Rain in minutes</span><input type="number" id="rain_in_minutes" placeholder="null = no rain" min="0" max="60"></label>
-
-<h2>Driver</h2>
-<label><span>Hours since meal</span><input type="range" id="hours_since_meal" min="0" max="10" step="0.5" value="1.5" oninput="this.nextElementSibling.textContent=this.value"><span class="val">1.5</span></label>
-<label><span>Current time</span><input type="text" id="current_time" value="10:00"></label>
-
-<h2>Destination (enables route-aware POI)</h2>
-<label><span>Dest label</span><input type="text" id="destination" placeholder="e.g. Santa Monica Pier"></label>
-<label><span>Dest latitude</span><input type="text" id="destination_lat" placeholder="e.g. 34.0083"></label>
-<label><span>Dest longitude</span><input type="text" id="destination_lng" placeholder="e.g. -118.4982"></label>
-<div class="preset-row">
-  <button class="preset" onclick="setDest('Santa Monica Pier',34.0083,-118.4982)">Santa Monica</button>
-  <button class="preset" onclick="setDest('LAX Airport',33.9425,-118.4081)">LAX</button>
-  <button class="preset" onclick="setDest('Pasadena City Hall',34.1478,-118.1445)">Pasadena</button>
-  <button class="preset" onclick="setDest('',null,null)">Clear</button>
-</div>
-
-<h2>Schedule</h2>
-<label><span>Meeting title</span><input type="text" id="next_meeting_title" placeholder="leave blank for none"></label>
-<label><span>Meeting time</span><input type="text" id="next_meeting_time" placeholder="e.g. 11:00"></label>
-<label><span>Meeting location</span><input type="text" id="next_meeting_location" placeholder="e.g. Santa Monica"></label>
-<label><span>Normal travel min</span><input type="number" id="normal_travel_minutes" placeholder="null"></label>
-<label><span>Traffic delay min</span><input type="number" id="traffic_delay_minutes" value="0" min="0"></label>
-
-<h2>Trip Memory</h2>
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-  <button class="preset" onclick="loadMemory()">Refresh Stats</button>
-  <button class="preset" style="color:#ef4444;border-color:#ef4444" onclick="resetMemory()">Reset Memory</button>
-</div>
-<pre id="mem_stats" style="font-size:11px;color:#4ade80;background:#0a0a0a;padding:12px;border-radius:4px;margin:0;min-height:48px;white-space:pre-wrap">Loading…</pre>
-
-<button id="apply" onclick="applyState()">Apply to Simulator</button>
-<div id="status"></div>
-
-<script>
-const bools = { windows_open: false, sunroof_open: false, ac_on: false };
-
-function toggleBool(key) {
-  bools[key] = !bools[key];
-  const btn = document.getElementById(key + '_btn');
-  const labels = { windows_open: ['Open','Closed'], sunroof_open: ['Open','Closed'], ac_on: ['On','Off'] };
-  btn.textContent = bools[key] ? labels[key][0] : labels[key][1];
-  btn.classList.toggle('on', bools[key]);
-}
-
-function setDest(label, lat, lng) {
-  document.getElementById('destination').value = label;
-  document.getElementById('destination_lat').value = lat ?? '';
-  document.getElementById('destination_lng').value = lng ?? '';
-}
-
-function setLocation(lat, lng, label) {
-  document.getElementById('lat').value = lat;
-  document.getElementById('lng').value = lng;
-  document.getElementById('location_label').value = label;
-}
-
-const PRESETS = {
-  low_fuel:     { fuel_percent: 12, range_km: 48, speed_kmh: 90 },
-  rain_open:    { rain_in_minutes: 8, _bools: { windows_open: true, sunroof_open: true } },
-  hungry:       { hours_since_meal: 5.0, current_time: '12:30' },
-  late_meeting: { next_meeting_title: 'Product Review', next_meeting_time: '11:00',
-                  next_meeting_location: 'Santa Monica', normal_travel_minutes: 45,
-                  traffic_delay_minutes: 20, current_time: '10:15' },
-  normal:       { fuel_percent: 65, range_km: 280, speed_kmh: 110,
-                  rain_in_minutes: null, hours_since_meal: 1.5, current_time: '10:00',
-                  _bools: { windows_open: false, sunroof_open: false, ac_on: false } },
-};
-
-function applyPreset(name) {
-  const p = PRESETS[name];
-  for (const [k, v] of Object.entries(p)) {
-    if (k === '_bools') {
-      for (const [bk, bv] of Object.entries(v)) {
-        if (bools[bk] !== bv) toggleBool(bk);
-      }
-    } else {
-      const el = document.getElementById(k);
-      if (el) { el.value = v ?? ''; if (el.type === 'range') el.nextElementSibling.textContent = v; }
-    }
-  }
-}
-
-async function obdConnect() {
-  const port = document.getElementById('obd_port').value.trim() || null;
-  const res = await fetch('/obd/connect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(port ? {port} : {}) });
-  const d = await res.json();
-  document.getElementById('obd_status').textContent = d.ok
-    ? `✓ Connected on ${d.port} — live data active`
-    : '✗ Not connected — check adapter and ignition';
-  document.getElementById('obd_status').style.color = d.ok ? '#4ade80' : '#ef4444';
-}
-
-async function obdDisconnect() {
-  await fetch('/obd/disconnect', { method: 'POST' });
-  document.getElementById('obd_status').textContent = 'Disconnected — simulator data in use';
-  document.getElementById('obd_status').style.color = '#888';
-}
-
-async function applyState() {
-  const state = {};
-  ['fuel_percent','range_km','speed_kmh','hours_since_meal'].forEach(k => {
-    const v = document.getElementById(k)?.value;
-    if (v !== '' && v != null) state[k] = parseFloat(v);
-  });
-  ['lat','lng'].forEach(k => {
-    const v = document.getElementById(k)?.value;
-    if (v) state[k] = parseFloat(v);
-  });
-  ['destination_lat','destination_lng'].forEach(k => {
-    const v = document.getElementById(k)?.value;
-    state[k] = v ? parseFloat(v) : null;
-  });
-  ['destination','location_label','current_time','next_meeting_title','next_meeting_time','next_meeting_location'].forEach(k => {
-    const v = document.getElementById(k)?.value;
-    state[k] = v || null;
-  });
-  ['normal_travel_minutes','traffic_delay_minutes'].forEach(k => {
-    const v = document.getElementById(k)?.value;
-    state[k] = v !== '' && v != null ? parseInt(v) : null;
-  });
-  const rain = document.getElementById('rain_in_minutes')?.value;
-  state.rain_in_minutes = rain !== '' && rain != null ? parseInt(rain) : null;
-  Object.assign(state, bools);
-
-  const res = await fetch('/demo/state', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(state) });
-  const data = await res.json();
-  document.getElementById('status').textContent = data.ok ? '✓ Applied — dashboard updated' : '✗ Error';
-  setTimeout(() => document.getElementById('status').textContent = '', 3000);
-}
-
-async function syncCalendar() {
-  const res = await fetch('/calendar/sync', { method: 'POST' });
-  const d = await res.json();
-  const el = document.getElementById('cal_status');
-  if (d.event) {
-    el.textContent = `✓ ${d.event.title} @ ${d.event.time}${d.event.location ? ' · ' + d.event.location : ''}`;
-    el.style.color = '#4ade80';
-  } else {
-    el.textContent = 'No upcoming events in next 12 h';
-    el.style.color = '#888';
-  }
-}
-
-async function loadMemory() {
-  const res = await fetch('/memory/stats');
-  const d = await res.json();
-  const lines = [
-    `Logged: ${d.total_logged} outcomes  |  Accept rate: ${(d.accept_rate * 100).toFixed(0)}%`,
-    d.preferred_cuisines.length ? `Prefers: ${d.preferred_cuisines.join(', ')}` : null,
-    d.avoided_cuisines.length   ? `Avoids:  ${d.avoided_cuisines.join(', ')}`   : null,
-    d.frequent_stops.length     ? `Frequent stops: ${d.frequent_stops.join(', ')}` : null,
-    d.active_hours.length       ? `Active hours: ${d.active_hours.map(h => h+':00').join(', ')}` : null,
-    d.total_logged < 5          ? '(Need 5+ outcomes before preferences activate)' : null,
-  ].filter(Boolean);
-  document.getElementById('mem_stats').textContent = lines.join('\n') || 'No data yet';
-}
-
-async function resetMemory() {
-  if (!confirm('Clear all trip memory?')) return;
-  await fetch('/memory/reset', { method: 'DELETE' });
-  loadMemory();
-}
-
-loadMemory();
-</script>
-</body>
-</html>"""

@@ -157,6 +157,17 @@ function onSignal(s) {
   document.getElementById('station-name').textContent = s.next_gas_station_name;
   document.getElementById('station-km').textContent   = `${Math.round(s.next_gas_station_km)} km`;
 
+  // Cognitive Driver Model bars
+  if (s.fatigue_index !== undefined) {
+    setDriverBar('ds-fatigue', s.fatigue_index);
+    setDriverBar('ds-load',    s.cognitive_load);
+    setDriverBar('ds-stress',  s.stress_index);
+    const risk = (s.driver_risk || 'low').toUpperCase();
+    const riskEl = document.getElementById('ds-risk');
+    riskEl.textContent = risk;
+    riskEl.className = 'ds-risk risk-' + (s.driver_risk || 'low');
+  }
+
   if (map) {
     carMarker.setLatLng([s.lat, s.lng]);
     map.panTo([s.lat, s.lng], { animate: true, duration: 0.6 });
@@ -185,6 +196,14 @@ function setStatusVal(id, text, warn) {
   const el = document.getElementById(id);
   el.textContent = text;
   el.className = 'status-val' + (warn ? ' warn' : '');
+}
+
+function setDriverBar(id, value) {
+  const fill = document.getElementById(id);
+  if (!fill) return;
+  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+  fill.style.width = pct + '%';
+  fill.className = 'ds-fill' + (pct > 65 ? ' ds-fill-high' : pct > 35 ? ' ds-fill-mid' : '');
 }
 
 /* ── Suggestion handler ───────────────────────────────────────────────────── */
@@ -342,6 +361,11 @@ const player = {
 
 let _previewAudio = null;
 
+function _setPauseBtn(icon) {
+  const btn = document.getElementById('pause-btn');
+  if (btn) btn.textContent = icon;
+}
+
 async function playTrack(track) {
   // Stop any previous audio
   if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
@@ -349,6 +373,7 @@ async function playTrack(track) {
 
   // Start synth immediately as placeholder
   player.play(track);
+  _setPauseBtn('⏸');
 
   const bar = document.getElementById('now-playing');
   bar.style.display = 'flex';
@@ -367,10 +392,12 @@ async function playTrack(track) {
       _previewAudio = new Audio(hit.previewUrl);
       _previewAudio.volume = 0.7;
       _previewAudio.play();
+      _setPauseBtn('⏸');
       document.getElementById('now-playing-title').textContent =
         `${hit.trackName} — ${hit.artistName}`;
       _previewAudio.onended = () => {
         document.getElementById('now-playing').style.display = 'none';
+        _setPauseBtn('⏸');
         _previewAudio = null;
       };
     } else {
@@ -384,9 +411,25 @@ async function playTrack(track) {
   }
 }
 
+function togglePause() {
+  if (_previewAudio) {
+    if (_previewAudio.paused) {
+      _previewAudio.play();
+      _setPauseBtn('⏸');
+    } else {
+      _previewAudio.pause();
+      _setPauseBtn('▶');
+    }
+  } else {
+    // Synth only — no pause support, treat as stop
+    stopTrack();
+  }
+}
+
 function stopTrack() {
   if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
   player.stop();
+  _setPauseBtn('⏸');
   document.getElementById('now-playing').style.display = 'none';
 }
 
@@ -453,6 +496,7 @@ function onMusicResults(data) {
 async function playITunesDirect(query) {
   if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
   player.stop();
+  _setPauseBtn('⏸');
 
   const bar = document.getElementById('now-playing');
   bar.style.display = 'flex';
@@ -468,10 +512,12 @@ async function playITunesDirect(query) {
       _previewAudio = new Audio(hit.previewUrl);
       _previewAudio.volume = 0.7;
       _previewAudio.play();
+      _setPauseBtn('⏸');
       document.getElementById('now-playing-title').textContent =
         `${hit.trackName} — ${hit.artistName}`;
       _previewAudio.onended = () => {
         document.getElementById('now-playing').style.display = 'none';
+        _setPauseBtn('⏸');
         _previewAudio = null;
       };
     } else {
@@ -789,22 +835,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initMap();
   connect();
 
-  document.querySelectorAll('[data-scenario]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const name = btn.dataset.scenario;
-      send({ type: 'play', scenario: name });
-      document.querySelectorAll('[data-scenario]').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('scenario-label').textContent = name.replace('_', ' ');
-      // Hide any previous suggestion
-      document.getElementById('suggestion-card').style.display = 'none';
-      document.getElementById('music-section').style.display = 'none';
-      setAgentDot('');
-      document.getElementById('agent-status-text').textContent = 'Listening…';
-    });
-  });
-
-  document.getElementById('sug-dismiss-btn').addEventListener('click', dismissSuggestion);
+document.getElementById('sug-dismiss-btn').addEventListener('click', dismissSuggestion);
 
   // Pre-warm mic permission so the first click works immediately
   if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
@@ -817,6 +848,19 @@ document.addEventListener('DOMContentLoaded', () => {
   const gpsBtn = document.getElementById('gps-btn');
   if (gpsBtn) gpsBtn.addEventListener('click', toggleGPS);
 
+  // One-shot GPS fix on load to set real position without continuous tracking
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude: lat, longitude: lng } = pos.coords;
+        const label = await _reverseGeocode(lat, lng);
+        send({ type: 'gps_update', lat, lng, label });
+      },
+      () => {},  // silently ignore if denied
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  }
+
   // Mute toggle
   document.getElementById('mute-btn').addEventListener('click', () => {
     _muted = !_muted;
@@ -826,15 +870,5 @@ document.addEventListener('DOMContentLoaded', () => {
     send({ type: 'mute', muted: _muted });
   });
 
-  document.getElementById('music-btn').addEventListener('click', () => {
-    const query = document.getElementById('music-input').value.trim();
-    if (!query) return;
-    send({ type: 'music_query', query });
-    document.getElementById('music-input').value = '';
-  });
-
-  document.getElementById('music-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('music-btn').click();
-  });
 
 });

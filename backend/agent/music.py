@@ -91,6 +91,43 @@ def _score(track: dict, params: dict) -> float:
     return score
 
 
+def quick_match(mood: str, energy: int, n: int = 5) -> list[dict]:
+    """
+    Instantly score CATALOGUE against mood keywords and energy — no LLM call.
+    Used by the orchestrator for immediate music action execution.
+    """
+    mood_words = set(w.lower().strip() for w in mood.replace(",", " ").split() if len(w) > 2)
+    # Map common orchestrator mood words to catalogue mood tags
+    _aliases = {
+        "calm": "calm", "calming": "calm", "relaxed": "relaxed",
+        "relaxing": "relaxed", "relax": "relaxed",
+        "chill": "calm", "chilled": "calm", "chilling": "calm",
+        "peaceful": "calm", "soothing": "calm", "mellow": "relaxed",
+        "energetic": "energetic", "energy": "energetic",
+        "upbeat": "upbeat", "intense": "intense",
+        "focus": "focus", "focused": "focus", "focusing": "focus",
+        "smooth": "smooth", "warm": "warm", "happy": "happy",
+        "groovy": "groovy", "night": "night", "morning": "morning",
+        "driving": "driving", "cozy": "cozy", "melancholic": "melancholic",
+        "epic": "epic", "alert": "energetic", "awake": "upbeat",
+    }
+    expanded = set()
+    for w in mood_words:
+        expanded.add(w)
+        if w in _aliases:
+            expanded.add(_aliases[w])
+
+    def _quick_score(track: dict) -> float:
+        mood_overlap = len(expanded & set(track["mood"]))
+        energy_diff  = abs(track["energy"] - energy)
+        return mood_overlap * 2.5 - energy_diff * 0.6
+
+    scored = sorted(CATALOGUE, key=_quick_score, reverse=True)
+    log.info("Music quick_match mood=%r energy=%d → top=%r",
+             mood, energy, scored[0]["title"] if scored else "—")
+    return scored[:n]
+
+
 async def query(description: str, n: int = 5) -> Optional[list[dict]]:
     """
     Given a natural-language taste description, return up to n matched tracks.

@@ -18,6 +18,8 @@ _RATE      = 185   # words per minute; default is 175
 
 _muted = False
 _voice: str = _FALLBACK   # resolved at startup
+_queue: asyncio.Queue = asyncio.Queue()
+_worker_started = False
 
 
 def _resolve_voice() -> str:
@@ -36,9 +38,29 @@ def _resolve_voice() -> str:
 
 
 def init():
-    """Call once at server startup to resolve the voice."""
-    global _voice
+    """Call once at server startup to resolve the voice and start the TTS worker."""
+    global _voice, _worker_started
     _voice = _resolve_voice()
+    if not _worker_started:
+        _worker_started = True
+        asyncio.get_event_loop().create_task(_tts_worker())
+
+
+async def _tts_worker():
+    """Drain the TTS queue one utterance at a time — prevents overlapping say processes."""
+    while True:
+        text = await _queue.get()
+        try:
+            await asyncio.to_thread(
+                subprocess.run,
+                ["say", "-v", _voice, "-r", str(_RATE), text],
+                check=True,
+                timeout=30,
+            )
+        except Exception:
+            log.exception("TTS worker failed for text: %r", text[:40])
+        finally:
+            _queue.task_done()
 
 
 def set_muted(muted: bool):
@@ -52,18 +74,9 @@ def is_muted() -> bool:
 
 
 async def speak(text: str) -> None:
-    if _muted:
+    if _muted or not text:
         return
-    spoken = text[:160]
-    try:
-        await asyncio.to_thread(
-            subprocess.run,
-            ["say", "-v", _voice, "-r", str(_RATE), spoken],
-            check=True,
-            timeout=20,
-        )
-    except Exception:
-        log.exception("TTS failed for text: %r", spoken[:40])
+    await _queue.put(text[:160])
 
 
 async def speak_stream(token_gen) -> str:
@@ -92,4 +105,6 @@ async def speak_stream(token_gen) -> str:
     if remainder:
         await speak(remainder)
 
+    # Wait for all queued utterances to finish before returning
+    await _queue.join()
     return full_text

@@ -74,26 +74,39 @@ async def enrich(suggestion: Suggestion, state: Signal) -> Suggestion:
         log.info("enrich[%s]: pinned to %s (%.1fkm)", category, best.name, best.distance_km)
 
     elif action == "check_weather":
-        forecast = await get_forecast(state.lat, state.lng)
-        if forecast is None:
-            return suggestion
-
-        if forecast.rain_in_hours is not None:
-            mins = int(forecast.rain_in_hours * 60)
+        # Prefer the state's rain signal (set by scenario or live weather loop)
+        state_rain = getattr(state, "rain_in_minutes", None)
+        if state_rain is not None:
+            windows_open = getattr(state, "windows_open", False)
+            sunroof_open = getattr(state, "sunroof_open", False)
+            opening = "windows and sunroof" if windows_open and sunroof_open else ("sunroof" if sunroof_open else "windows")
             suggestion.enriched_action = {
                 "type": "cabin_action",
-                "label": "Close windows & start AC",
+                "label": f"Close {opening} & start AC",
                 "action": "close_windows_ac",
             }
-            suggestion.headline = f"Rain in ~{mins} min — close windows"
-            suggestion.detail = (
-                f"{forecast.condition} approaching. "
-                f"Windows {'and sunroof' if state.sunroof_open else ''} are open."
-            )
+            suggestion.headline = f"Rain in ~{state_rain} min — close {opening}"
+            suggestion.detail = f"Rain is approaching and your {opening} are open."
         else:
-            suggestion.enriched_action = {
-                "type": "info",
-                "label": f"{forecast.condition}, {forecast.temp_c:.0f}°C",
-            }
+            forecast = await get_forecast(state.lat, state.lng)
+            if forecast is None:
+                return suggestion
+            if forecast.rain_in_hours is not None:
+                mins = int(forecast.rain_in_hours * 60)
+                suggestion.enriched_action = {
+                    "type": "cabin_action",
+                    "label": "Close windows & start AC",
+                    "action": "close_windows_ac",
+                }
+                suggestion.headline = f"Rain in ~{mins} min — close windows"
+                suggestion.detail = (
+                    f"{forecast.condition} approaching. "
+                    f"Windows {'and sunroof' if getattr(state, 'sunroof_open', False) else ''} are open."
+                )
+            else:
+                suggestion.enriched_action = {
+                    "type": "info",
+                    "label": f"{forecast.condition}, {forecast.temp_c:.0f}°C",
+                }
 
     return suggestion

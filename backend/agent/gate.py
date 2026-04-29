@@ -50,45 +50,100 @@ def _compact(state) -> dict:
     }
 
 
-def _python_precheck(
-    s: dict, last_type: Optional[str], mins_since_last: float
-) -> tuple[Optional[bool], Optional[str]]:
+def _get_thresholds() -> dict:
+    try:
+        import trip_memory  # noqa: PLC0415
+        return trip_memory.get_adaptive_thresholds()
+    except Exception:
+        return {"meal_hours_threshold": 4.0, "fuel_pct_threshold": 15.0, "rest_minutes_threshold": 90.0}
+
+
+def _score_triggers(s: dict, last_type: Optional[str]) -> list[tuple[int, str]]:
     """
-    Fast deterministic check for unambiguous triggers.
-    Returns (True, trigger)  → definitely speak, with trigger label for generator
-    Returns (False, None)    → definitely silent
-    Returns (None, None)     → ambiguous, let LLM decide
+    Real-Time Tradeoff Engine: score every active signal.
+    Returns list of (urgency_score, trigger_string) sorted highest first.
     """
-    if mins_since_last < 3:
-        return False, None
+    candidates: list[tuple[int, str]] = []
+    thresholds = _get_thresholds()
 
     rain = s.get("rain_in_min")
     if rain is not None and rain < 10 and (s.get("windows_open") or s.get("sunroof_open")):
-        if last_type != "cabin":
-            return True, "rain approaching with windows/sunroof open — suggest closing them (type=cabin)"
+        urgency = 5 if rain < 4 else 4
+        candidates.append((urgency, "rain approaching with windows/sunroof open — suggest closing them (type=cabin)"))
 
     fuel = s.get("fuel_pct", 100)
     range_km = s.get("range_km", 999)
     station_km = s.get("next_station_km", 999)
-    if fuel < 15 and range_km < station_km * 2:
-        if last_type != "range":
-            return True, "fuel critically low — suggest stopping for fuel (type=range)"
+    fuel_threshold = thresholds["fuel_pct_threshold"]
+    if fuel < fuel_threshold and range_km < station_km * 2:
+        urgency = 5 if fuel < fuel_threshold * 0.55 else 4
+        candidates.append((urgency, "fuel critically low — suggest stopping for fuel (type=range)"))
+
+    driving_min = s.get("driving_min", 0)
+    rest_threshold = thresholds["rest_minutes_threshold"]
+    if driving_min >= rest_threshold:
+        urgency = 5 if driving_min >= rest_threshold * 1.6 else 4
+        candidates.append((urgency, f"driver has been driving {driving_min:.0f} minutes continuously — suggest a rest stop (type=rest)"))
 
     meal_hours = s.get("hours_since_meal", 0)
+    meal_threshold = thresholds["meal_hours_threshold"]
     try:
         hour = int(str(s.get("time", "0:00")).split(":")[0])
         is_mealtime = (11 <= hour <= 14) or (17 <= hour <= 21)
     except (ValueError, AttributeError):
         is_mealtime = False
-    if meal_hours > 4 and is_mealtime:
-        if last_type != "meal":
-            return True, "driver hasn't eaten in 4+ hours during mealtime — suggest a nearby restaurant (type=meal)"
+    if meal_hours > meal_threshold and is_mealtime:
+        urgency = 4 if meal_hours > meal_threshold + 2 else 3
+        candidates.append((urgency, f"driver hasn't eaten in {meal_hours:.1f} hours during mealtime — suggest a nearby restaurant (type=meal)"))
 
-    driving_min = s.get("driving_min", 0)
-    if driving_min >= 90 and last_type != "rest":
-        return True, f"driver has been driving {driving_min:.0f} minutes continuously — suggest a rest stop (type=rest)"
+    # Remove triggers that repeat the last type (except critical safety ones)
+    SAFETY_TYPES = {"cabin", "range"}
+    filtered = [
+        (u, t) for u, t in candidates
+        if last_type is None
+        or any(f"type={last_type}" not in t or st in t for st in SAFETY_TYPES)
+        or u >= 5
+    ]
+
+    return sorted(filtered, key=lambda x: x[0], reverse=True)
+
+
+def _python_precheck(
+    s: dict, last_type: Optional[str], mins_since_last: float
+) -> tuple[Optional[bool], Optional[str]]:
+    """
+    Tradeoff engine pre-check: returns highest-priority trigger.
+    Returns (True, trigger)  → definitely speak
+    Returns (False, None)    → definitely silent (cooldown)
+    Returns (None, None)     → ambiguous, let LLM decide (schedule etc.)
+    """
+    if mins_since_last < 3:
+        return False, None
+
+    candidates = _score_triggers(s, last_type)
+    if candidates:
+        best_urgency, best_trigger = candidates[0]
+        log.info("Tradeoff engine: %d candidate(s), best urgency=%d — %s",
+                 len(candidates), best_urgency, best_trigger[:60])
+        return True, best_trigger
+
+    # Only hand off to the LLM when there is genuinely something to evaluate.
+    # Truly idle state (no meeting, low meal hours, good fuel, no fatigue) → skip LLM.
+    has_meeting      = s.get("meeting") is not None
+    meal_approaching = s.get("hours_since_meal", 0) > 3.0
+    fuel_watch       = s.get("fuel_pct", 100) < 30
+    fatigue_watch    = s.get("driving_min", 0) > 60
+    traffic_notable  = s.get("traffic_delay_min", 0) > 5
+
+    if not any([has_meeting, meal_approaching, fuel_watch, fatigue_watch, traffic_notable]):
+        return False, None   # nothing interesting — skip LLM entirely
 
     return None, None  # let the LLM handle schedule / ambiguous cases
+
+
+# How often the LLM gate is allowed to run (separate from rule-check interval)
+_LLM_GATE_INTERVAL_SEC = 30
+_last_llm_gate_at: float = 0.0
 
 
 async def should_speak(
@@ -101,24 +156,34 @@ async def should_speak(
     global _total_calls, _yes_count
     _total_calls += 1
 
+    global _last_llm_gate_at
+
     compact_window = [_compact(s) for s in state_window]
     latest = compact_window[-1]
 
-    log.info("Gate called (rain=%s windows=%s sunroof=%s fuel=%.0f%% meal=%.1fh)",
-             latest["rain_in_min"], latest["windows_open"], latest["sunroof_open"],
-             latest["fuel_pct"], latest["hours_since_meal"])
+    log.debug("Gate tick (rain=%s fuel=%.0f%% meal=%.1fh driving=%dmin)",
+              latest["rain_in_min"], latest["fuel_pct"],
+              latest["hours_since_meal"], latest["driving_min"])
 
-    # Fast path — no LLM needed for clear triggers
+    # Fast path — rule-based triggers (no LLM)
     precheck, trigger = _python_precheck(latest, last_suggestion_type, minutes_since_last)
     if precheck is True:
         _yes_count += 1
-        log.info("Gate: YES (rule-based trigger=%s)", trigger)
+        log.info("Gate: YES (rule trigger=%s)", trigger[:60])
         return True, trigger
     if precheck is False:
-        log.info("Gate: NO (rule-based cooldown)")
         return False, None
 
-    # LLM path — meal, schedule, ambiguous
+    # LLM path — only for schedule / nuanced conditions, throttled to 30 s
+    import time as _time
+    now = _time.monotonic()
+    if now - _last_llm_gate_at < _LLM_GATE_INTERVAL_SEC:
+        return False, None
+    _last_llm_gate_at = now
+
+    log.info("Gate: LLM check (meeting=%s meal=%.1fh traffic=%dmin)",
+             latest.get("meeting"), latest["hours_since_meal"], latest.get("traffic_delay_min", 0))
+
     state_json = json.dumps(compact_window, indent=None)
 
     if was_dismissed:
@@ -158,5 +223,5 @@ async def should_speak(
         log.info("Gate: YES (LLM, rain=%s meal=%.1fh)", latest["rain_in_min"], latest["hours_since_meal"])
         return True, "ambiguous condition — generate the most relevant suggestion"
     else:
-        log.info("Gate: NO (LLM raw=%r)", raw)
+        log.debug("Gate: NO (LLM raw=%r)", raw)
         return False, None

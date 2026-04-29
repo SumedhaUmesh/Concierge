@@ -109,7 +109,7 @@ async def find_poi(
                 for r in results:
                     if not r or not isinstance(r, dict):
                         continue
-                    name = r.get("namedetails", {}).get("name") or r.get("display_name", "").split(",")[0]
+                    name = (r.get("namedetails") or {}).get("name") or r.get("display_name", "").split(",")[0]
                     if not name or len(name) < 2:
                         continue
                     try:

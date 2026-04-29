@@ -242,6 +242,61 @@ def get_nearby_accepted_place(lat: float, lng: float, radius_km: float = 0.5) ->
     return best
 
 
+def get_adaptive_thresholds() -> dict:
+    """
+    Self-Optimizing AI: compute personalized gate thresholds from accept/dismiss history.
+    Falls back to defaults when fewer than 10 outcomes exist.
+    """
+    DEFAULTS = {
+        "meal_hours_threshold":  4.0,
+        "fuel_pct_threshold":    15.0,
+        "rest_minutes_threshold": 90.0,
+    }
+    with _lock:
+        conn = _get_conn()
+        rows = conn.execute("""
+            SELECT type,
+                   SUM(CASE WHEN outcome='accepted' THEN 1 ELSE 0 END) AS accepted,
+                   COUNT(*) AS total
+            FROM suggestions
+            GROUP BY type
+        """).fetchall()
+
+    if not rows or sum(r["total"] for r in rows) < 10:
+        return DEFAULTS
+
+    by_type = {r["type"]: (r["accepted"] or 0, r["total"]) for r in rows}
+    thresholds = dict(DEFAULTS)
+
+    # Meal: if dismiss rate > 60% → raise threshold; if accept rate > 75% → lower
+    if "meal" in by_type:
+        acc, total = by_type["meal"]
+        rate = acc / max(total, 1)
+        if rate < 0.40:
+            thresholds["meal_hours_threshold"] = 5.0
+        elif rate > 0.75:
+            thresholds["meal_hours_threshold"] = 3.0
+
+    # Fuel: if always accepted → driver trusts early warnings → raise threshold slightly
+    if "range" in by_type:
+        acc, total = by_type["range"]
+        rate = acc / max(total, 1)
+        if rate > 0.80:
+            thresholds["fuel_pct_threshold"] = 20.0  # warn earlier
+
+    # Rest: if always dismissed → driver prefers longer stretches
+    if "rest" in by_type:
+        acc, total = by_type["rest"]
+        rate = acc / max(total, 1)
+        if rate < 0.35:
+            thresholds["rest_minutes_threshold"] = 120.0
+        elif rate > 0.75:
+            thresholds["rest_minutes_threshold"] = 75.0
+
+    log.info("Adaptive thresholds: %s", thresholds)
+    return thresholds
+
+
 def _compress_hours(hours: list) -> str:
     """[11, 12, 13, 17, 18] → '11:00–14:00, 17:00–19:00'"""
     if not hours:

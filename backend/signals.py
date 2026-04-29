@@ -42,6 +42,12 @@ class Signal:
     current_time: str = "10:00"
     minutes_driving_continuously: float = 0.0
 
+    # Cognitive Driver Model (computed each tick by AgentLoop)
+    fatigue_index: float = 0.0
+    cognitive_load: float = 0.0
+    stress_index: float = 0.0
+    driver_risk: str = "low"
+
     # Route — gas station always set (nearest on route)
     next_gas_station_name: str = "Shell, Exit 14"
     next_gas_station_km: float = 45.0
