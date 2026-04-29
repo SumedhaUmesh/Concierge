@@ -1,6 +1,9 @@
 """
-TTS via macOS `say` — plays through system speakers.
-Zero dependencies. Samantha voice sounds clean for a demo.
+TTS via macOS `say`.
+
+Uses the neural voice "Flo (English (US))" when available (macOS 13+),
+falls back to Samantha. Neural voices sound noticeably cleaner and are
+the same engine Apple uses in Siri on device.
 """
 
 import asyncio
@@ -9,8 +12,33 @@ import subprocess
 
 log = logging.getLogger(__name__)
 
-VOICE = "Samantha"
+_PREFERRED = "Flo (English (US))"
+_FALLBACK  = "Samantha"
+_RATE      = 185   # words per minute; default is 175
+
 _muted = False
+_voice: str = _FALLBACK   # resolved at startup
+
+
+def _resolve_voice() -> str:
+    """Pick neural voice if installed, otherwise fall back."""
+    try:
+        result = subprocess.run(
+            ["say", "-v", "?"], capture_output=True, text=True, timeout=5
+        )
+        if _PREFERRED in result.stdout:
+            log.info("TTS: using neural voice %r", _PREFERRED)
+            return _PREFERRED
+    except Exception:
+        pass
+    log.info("TTS: neural voice not installed, using %r", _FALLBACK)
+    return _FALLBACK
+
+
+def init():
+    """Call once at server startup to resolve the voice."""
+    global _voice
+    _voice = _resolve_voice()
 
 
 def set_muted(muted: bool):
@@ -24,16 +52,15 @@ def is_muted() -> bool:
 
 
 async def speak(text: str) -> None:
-    """Speak text through system speakers. Non-blocking."""
     if _muted:
         return
-    spoken = text[:120]
+    spoken = text[:160]
     try:
         await asyncio.to_thread(
             subprocess.run,
-            ["say", "-v", VOICE, spoken],
+            ["say", "-v", _voice, "-r", str(_RATE), spoken],
             check=True,
-            timeout=15,
+            timeout=20,
         )
     except Exception:
         log.exception("TTS failed for text: %r", spoken[:40])
@@ -42,9 +69,6 @@ async def speak(text: str) -> None:
 async def speak_stream(token_gen) -> str:
     """
     Consume an async token generator and speak each sentence as it completes.
-    Sentence boundaries: '. ', '! ', '? ' (or followed by newline).
-    Speaking the first sentence starts before the full response is generated,
-    cutting perceived latency by 1–3 s on typical Q&A answers.
     Returns the full concatenated text.
     """
     _ENDINGS = (". ", "! ", "? ", ".\n", "!\n", "?\n")

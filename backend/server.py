@@ -129,6 +129,7 @@ async def memory_reset():
 async def _warmup():
     from agent.llm import get_llm  # noqa: PLC0415
     await asyncio.to_thread(get_llm)
+    tts.init()
     asyncio.create_task(_calendar_sync_loop())
 
 
