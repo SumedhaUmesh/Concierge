@@ -69,6 +69,18 @@ async def obd_status():
     return obd_source.status_dict()
 
 
+@app.get("/route")
+async def get_route_polyline(
+    from_lat: float, from_lng: float, to_lat: float, to_lng: float
+):
+    """Fetch OSRM driving route and return as [[lat,lng], ...] for Leaflet."""
+    from agent.tools.route import get_route  # noqa: PLC0415
+    points = await get_route(from_lat, from_lng, to_lat, to_lng)
+    if not points:
+        return {"ok": False, "points": []}
+    return {"ok": True, "points": points}
+
+
 @app.post("/calendar/sync")
 async def calendar_sync():
     event = await _do_calendar_sync()

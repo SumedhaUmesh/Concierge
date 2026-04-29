@@ -32,6 +32,8 @@ function setGauge(fillId, pct) {
 /* ── Map ──────────────────────────────────────────────────────────────────── */
 
 let map, carMarker, stationMarker, restStopMarker, destMarker, enrichedMarker;
+let routePolyline = null;
+let _lastRouteDest = null;
 
 function initMap() {
   map = L.map('map', {
@@ -70,6 +72,25 @@ function setMarker(marker, lat, lng, show) {
   } else {
     if (map.hasLayer(marker)) map.removeLayer(marker);
   }
+}
+
+async function drawRoute(fromLat, fromLng, toLat, toLng) {
+  try {
+    const res = await fetch(
+      `/route?from_lat=${fromLat}&from_lng=${fromLng}&to_lat=${toLat}&to_lng=${toLng}`
+    );
+    if (!res.ok) return;
+    const data = await res.json();
+    const coords = data.points || [];
+    if (!Array.isArray(coords) || coords.length < 2) return;
+    if (routePolyline) { map.removeLayer(routePolyline); routePolyline = null; }
+    routePolyline = L.polyline(coords, {
+      color: '#60a5fa',
+      weight: 3,
+      opacity: 0.75,
+      dashArray: null,
+    }).addTo(map);
+  } catch (_) {}
 }
 
 /* ── Signal handler ───────────────────────────────────────────────────────── */
@@ -145,6 +166,18 @@ function onSignal(s) {
               s.next_rest_stop_km != null);
     setMarker(destMarker, s.destination_lat, s.destination_lng,
               s.destination != null);
+
+    // Draw / clear OSRM route when destination changes
+    const destKey = (s.destination_lat != null && s.destination_lng != null)
+      ? `${s.destination_lat.toFixed(4)},${s.destination_lng.toFixed(4)}` : null;
+    if (destKey !== _lastRouteDest) {
+      _lastRouteDest = destKey;
+      if (destKey) {
+        drawRoute(s.lat, s.lng, s.destination_lat, s.destination_lng);
+      } else {
+        if (routePolyline) { map.removeLayer(routePolyline); routePolyline = null; }
+      }
+    }
   }
 }
 
