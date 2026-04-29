@@ -84,10 +84,25 @@ suggested_action options: "find_poi:fuel" | "find_poi:food" | "find_poi:rest" | 
 
 Respond with ONLY the JSON object, nothing else."""
 
+# ── Q&A ─────────────────────────────────────────────────────────────────────
+
+VEHICLE_QA_SYSTEM = """\
+You are a concise in-car assistant. Answer the driver's spoken question in 1-2 short sentences using the vehicle state provided. Be specific with numbers. Do not offer unsolicited suggestions."""
+
+VEHICLE_QA_USER = """\
+Vehicle state:
+{state_json}
+
+Driver asked: "{question}"
+
+Answer:"""
+
 SUGGESTION_GENERATOR_V1_USER = """\
 Vehicle state:
 {state_json}
 
 Triggered by: {trigger}
+
+{preferences}
 
 Generate a suggestion JSON object (type must match the trigger):"""

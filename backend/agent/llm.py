@@ -83,7 +83,6 @@ async def complete(
     called concurrently from multiple threads.
     """
     def _run():
-        # Acquire lock for the full load + inference cycle
         with _lock:
             if not _ready:
                 _load()
@@ -104,3 +103,48 @@ async def complete(
     except Exception:
         log.exception("LLM completion failed")
         return None
+
+
+async def stream_complete(
+    messages: list[dict],
+    max_tokens: int = 150,
+    temperature: float = 0.3,
+):
+    """
+    Async generator that yields text tokens as they are produced.
+    No grammar support — use complete() for constrained JSON output.
+    Holds _lock for the full generation (Metal is not concurrent-safe).
+    """
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    def _run():
+        with _lock:
+            if not _ready:
+                _load()
+            if _llm is None:
+                loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+                return
+            try:
+                for chunk in _llm.create_chat_completion(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    stream=True,
+                ):
+                    delta = chunk["choices"][0]["delta"].get("content", "")
+                    if delta:
+                        loop.call_soon_threadsafe(queue.put_nowait, delta)
+            except Exception:
+                log.exception("Stream generation failed")
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+    asyncio.create_task(asyncio.to_thread(_run))
+
+    while True:
+        token = await queue.get()
+        if token is _DONE:
+            break
+        yield token

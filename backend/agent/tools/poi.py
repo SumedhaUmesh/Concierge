@@ -65,7 +65,15 @@ async def find_poi(
     lon: float,
     radius_km: float = 20.0,
     limit: int = 5,
+    route: Optional[list] = None,
+    route_threshold_km: float = 0.8,
 ) -> list[POI]:
+    """
+    Return up to `limit` POIs sorted by distance.
+    If `route` is provided (list of (lat,lon) tuples), only POIs within
+    `route_threshold_km` of the route are returned — ignoring those that
+    are nearby but off the driver's actual path.
+    """
     key = (category, round(lat, 2), round(lon, 2))
     if key in _cache and _cache[key]:
         return _cache[key]
@@ -130,6 +138,7 @@ async def find_poi(
                 log.warning("Nominatim request failed for %s: %s", params.get("amenity") or params.get("q"), exc)
 
     all_pois.sort(key=lambda p: p.distance_km)
+
     # Deduplicate by name
     seen: set[str] = set()
     unique: list[POI] = []
@@ -138,7 +147,19 @@ async def find_poi(
             seen.add(p.name)
             unique.append(p)
 
-    result = unique[:limit * 2]  # keep more for preference matching
+    # Route-aware filtering: keep only POIs on or near the route
+    if route and len(route) > 1:
+        from agent.tools.route import distance_to_route
+        on_route = [p for p in unique
+                    if distance_to_route(p.lat, p.lng, route) <= route_threshold_km]
+        if on_route:
+            log.info("POI[%s] route-filtered: %d/%d on route (±%.1f km)",
+                     category, len(on_route), len(unique), route_threshold_km)
+            unique = on_route
+        else:
+            log.info("POI[%s] no results on route — using radius fallback", category)
+
+    result = unique[:limit * 2]  # keep more candidates for preference matching
     log.info("POI[%s] found %d results near (%.3f,%.3f)", category, len(result), lat, lon)
     _cache[key] = result
     return result

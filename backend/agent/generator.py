@@ -13,6 +13,7 @@ from typing import Optional
 from agent import llm as llm_mod
 from agent.prompts import SUGGESTION_GENERATOR_V1_SYSTEM, SUGGESTION_GENERATOR_V1_USER
 from signals import Suggestion
+import trip_memory
 
 log = logging.getLogger(__name__)
 
@@ -65,11 +66,15 @@ async def generate_suggestion(state_window: list, trigger: Optional[str] = None)
     latest = state_window[-1]
     state_json = json.dumps(_compact_state(latest), indent=2)
 
+    prefs_ctx = trip_memory.get_context_string()
+    preferences_block = prefs_ctx if prefs_ctx else "No driver preferences recorded yet."
+
     messages = [
         {"role": "system", "content": SUGGESTION_GENERATOR_V1_SYSTEM},
         {"role": "user", "content": SUGGESTION_GENERATOR_V1_USER.format(
             state_json=state_json,
             trigger=trigger or "generate the most relevant suggestion based on state",
+            preferences=preferences_block,
         )},
     ]
 

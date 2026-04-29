@@ -476,12 +476,20 @@ html, body {
   user-select: none;
 }
 .ptt-btn:hover { border-color: var(--dim); color: var(--text); }
+.ptt-btn.armed {
+  background: #0a1a0a;
+  border-color: var(--green);
+  color: var(--green);
+  animation: pulse 2s infinite;
+}
+
 .ptt-btn.recording {
   background: #1a0a0a;
   border-color: var(--red);
   color: var(--red);
   animation: pulse 0.8s infinite;
 }
+
 
 .transcript-row {
   margin-top: 7px;

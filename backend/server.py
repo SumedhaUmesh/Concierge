@@ -15,6 +15,9 @@ from obd_source import obd_source
 from tool_router import enrich
 from agent import music as music_mod
 from agent.voice import tts, asr, classifier
+from agent import llm as llm_mod
+from agent.prompts import VEHICLE_QA_SYSTEM, VEHICLE_QA_USER
+import trip_memory
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -62,6 +65,21 @@ async def obd_disconnect():
 @app.get("/obd/status")
 async def obd_status():
     return obd_source.status_dict()
+
+
+@app.get("/memory/stats")
+async def memory_stats():
+    return trip_memory.get_preferences()
+
+
+@app.delete("/memory/reset")
+async def memory_reset():
+    import sqlite3 as _sq
+    with trip_memory._lock:
+        conn = trip_memory._get_conn()
+        conn.execute("DELETE FROM suggestions")
+        conn.commit()
+    return {"ok": True}
 
 
 @app.on_event("startup")
@@ -119,8 +137,12 @@ async def ws_endpoint(websocket: WebSocket):
                 await sim.reset()
             elif kind == "user_dismiss":
                 agent.dismiss()
+                if latest_suggestion:
+                    trip_memory.log_outcome(latest_suggestion[0], "dismissed", sim.state)
             elif kind == "user_accept":
                 agent.accept()
+                if latest_suggestion:
+                    trip_memory.log_outcome(latest_suggestion[0], "accepted", sim.state)
             elif kind == "mute":
                 tts.set_muted(msg.get("muted", False))
             elif kind == "music_query":
@@ -185,7 +207,8 @@ async def _handle_voice(
         agent.dismiss()
         asyncio.create_task(tts.speak("Got it. I'll check back in a few minutes."))
 
-    # intent == "query": transcript already echoed
+    elif intent == "query":
+        asyncio.create_task(_handle_query(websocket, transcript, sim.state))
 
 
 async def _handle_hungry(
@@ -195,10 +218,18 @@ async def _handle_hungry(
     state,
 ):
     from agent.tools.poi import find_poi
+    from agent.tools.route import get_route
 
-    # Limit search radius to 80% of current fuel range (safety margin)
     radius_km = min(state.range_km * 0.8, 25.0)
-    pois = await find_poi("food", state.lat, state.lng, radius_km=radius_km)
+
+    # Fetch route if destination is set so we only suggest on-the-way food
+    route = None
+    if state.destination_lat and state.destination_lng:
+        route = await get_route(state.lat, state.lng,
+                                state.destination_lat, state.destination_lng)
+
+    pois = await find_poi("food", state.lat, state.lng,
+                          radius_km=radius_km, route=route)
 
     if not pois:
         asyncio.create_task(tts.speak("I couldn't find any restaurants within range right now."))
@@ -290,6 +321,34 @@ async def _handle_meal_preference(
     await on_suggestion(suggestion)
 
 
+async def _handle_query(websocket: WebSocket, question: str, state) -> None:
+    """Answer a driver's spoken question using streaming LLM → sentence-by-sentence TTS."""
+    from dataclasses import asdict
+    compact = {k: v for k, v in asdict(state).items()
+               if v is not None and v != 0 and k not in ("is_on_highway",)}
+    state_json = json.dumps(compact, indent=2)
+
+    messages = [
+        {"role": "system", "content": VEHICLE_QA_SYSTEM},
+        {"role": "user", "content": VEHICLE_QA_USER.format(
+            state_json=state_json, question=question,
+        )},
+    ]
+
+    token_gen = llm_mod.stream_complete(messages, max_tokens=120, temperature=0.3)
+    answer = await tts.speak_stream(token_gen)
+
+    log.info("Q&A: %r → %r", question[:40], answer[:80])
+
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "transcript",
+            "data": {"text": f"A: {answer.strip()}"},
+        }))
+    except Exception:
+        pass
+
+
 async def _handle_music(websocket: WebSocket, query: str):
     tracks = await music_mod.query(query)
     if tracks is None:
@@ -375,12 +434,30 @@ _DEMO_HTML = """<!DOCTYPE html>
 <label><span>Hours since meal</span><input type="range" id="hours_since_meal" min="0" max="10" step="0.5" value="1.5" oninput="this.nextElementSibling.textContent=this.value"><span class="val">1.5</span></label>
 <label><span>Current time</span><input type="text" id="current_time" value="10:00"></label>
 
+<h2>Destination (enables route-aware POI)</h2>
+<label><span>Dest label</span><input type="text" id="destination" placeholder="e.g. Santa Monica Pier"></label>
+<label><span>Dest latitude</span><input type="text" id="destination_lat" placeholder="e.g. 34.0083"></label>
+<label><span>Dest longitude</span><input type="text" id="destination_lng" placeholder="e.g. -118.4982"></label>
+<div class="preset-row">
+  <button class="preset" onclick="setDest('Santa Monica Pier',34.0083,-118.4982)">Santa Monica</button>
+  <button class="preset" onclick="setDest('LAX Airport',33.9425,-118.4081)">LAX</button>
+  <button class="preset" onclick="setDest('Pasadena City Hall',34.1478,-118.1445)">Pasadena</button>
+  <button class="preset" onclick="setDest('',null,null)">Clear</button>
+</div>
+
 <h2>Schedule</h2>
 <label><span>Meeting title</span><input type="text" id="next_meeting_title" placeholder="leave blank for none"></label>
 <label><span>Meeting time</span><input type="text" id="next_meeting_time" placeholder="e.g. 11:00"></label>
 <label><span>Meeting location</span><input type="text" id="next_meeting_location" placeholder="e.g. Santa Monica"></label>
 <label><span>Normal travel min</span><input type="number" id="normal_travel_minutes" placeholder="null"></label>
 <label><span>Traffic delay min</span><input type="number" id="traffic_delay_minutes" value="0" min="0"></label>
+
+<h2>Trip Memory</h2>
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+  <button class="preset" onclick="loadMemory()">Refresh Stats</button>
+  <button class="preset" style="color:#ef4444;border-color:#ef4444" onclick="resetMemory()">Reset Memory</button>
+</div>
+<pre id="mem_stats" style="font-size:11px;color:#4ade80;background:#0a0a0a;padding:12px;border-radius:4px;margin:0;min-height:48px;white-space:pre-wrap">Loading…</pre>
 
 <button id="apply" onclick="applyState()">Apply to Simulator</button>
 <div id="status"></div>
@@ -394,6 +471,12 @@ function toggleBool(key) {
   const labels = { windows_open: ['Open','Closed'], sunroof_open: ['Open','Closed'], ac_on: ['On','Off'] };
   btn.textContent = bools[key] ? labels[key][0] : labels[key][1];
   btn.classList.toggle('on', bools[key]);
+}
+
+function setDest(label, lat, lng) {
+  document.getElementById('destination').value = label;
+  document.getElementById('destination_lat').value = lat ?? '';
+  document.getElementById('destination_lng').value = lng ?? '';
 }
 
 function setLocation(lat, lng, label) {
@@ -454,7 +537,11 @@ async function applyState() {
     const v = document.getElementById(k)?.value;
     if (v) state[k] = parseFloat(v);
   });
-  ['location_label','current_time','next_meeting_title','next_meeting_time','next_meeting_location'].forEach(k => {
+  ['destination_lat','destination_lng'].forEach(k => {
+    const v = document.getElementById(k)?.value;
+    state[k] = v ? parseFloat(v) : null;
+  });
+  ['destination','location_label','current_time','next_meeting_title','next_meeting_time','next_meeting_location'].forEach(k => {
     const v = document.getElementById(k)?.value;
     state[k] = v || null;
   });
@@ -471,6 +558,28 @@ async function applyState() {
   document.getElementById('status').textContent = data.ok ? '✓ Applied — dashboard updated' : '✗ Error';
   setTimeout(() => document.getElementById('status').textContent = '', 3000);
 }
+
+async function loadMemory() {
+  const res = await fetch('/memory/stats');
+  const d = await res.json();
+  const lines = [
+    `Logged: ${d.total_logged} outcomes  |  Accept rate: ${(d.accept_rate * 100).toFixed(0)}%`,
+    d.preferred_cuisines.length ? `Prefers: ${d.preferred_cuisines.join(', ')}` : null,
+    d.avoided_cuisines.length   ? `Avoids:  ${d.avoided_cuisines.join(', ')}`   : null,
+    d.frequent_stops.length     ? `Frequent stops: ${d.frequent_stops.join(', ')}` : null,
+    d.active_hours.length       ? `Active hours: ${d.active_hours.map(h => h+':00').join(', ')}` : null,
+    d.total_logged < 5          ? '(Need 5+ outcomes before preferences activate)' : null,
+  ].filter(Boolean);
+  document.getElementById('mem_stats').textContent = lines.join('\n') || 'No data yet';
+}
+
+async function resetMemory() {
+  if (!confirm('Clear all trip memory?')) return;
+  await fetch('/memory/reset', { method: 'DELETE' });
+  loadMemory();
+}
+
+loadMemory();
 </script>
 </body>
 </html>"""

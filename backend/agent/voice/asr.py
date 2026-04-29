@@ -56,7 +56,10 @@ async def transcribe(audio_b64: str) -> Optional[str]:
         # Whisper expects float32 at 16kHz — browser records at exactly 16kHz
         result = model.transcribe(data, language="en", fp16=False)
         text = result["text"].strip()
-        log.info("ASR: %r", text)
+        if text:
+            log.info("ASR: %r", text)
+        else:
+            log.debug("ASR: empty (no speech detected)")
         return text
 
     try:

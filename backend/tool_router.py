@@ -10,6 +10,7 @@ import logging
 from dataclasses import asdict
 
 from agent.tools.poi import find_poi
+from agent.tools.route import get_route
 from agent.tools.weather import get_forecast
 from signals import Signal, Suggestion
 
@@ -25,7 +26,15 @@ async def enrich(suggestion: Suggestion, state: Signal) -> Suggestion:
 
     if action.startswith("find_poi:"):
         category = action.split(":", 1)[1]
-        pois = await find_poi(category, state.lat, state.lng, radius_km=25.0, limit=3)
+
+        # Fetch route if destination is known, so POIs are on-the-way not just nearby
+        route = None
+        if state.destination_lat and state.destination_lng:
+            route = await get_route(state.lat, state.lng,
+                                    state.destination_lat, state.destination_lng)
+
+        pois = await find_poi(category, state.lat, state.lng,
+                              radius_km=25.0, limit=3, route=route)
 
         if not pois:
             log.info("enrich: no POIs found for %s", category)

@@ -520,9 +520,7 @@ function encodeWAV(samples, sampleRate) {
 async function startRecording() {
   pttSamples = [];
   pttRecording = true;
-  document.getElementById('ptt-btn').classList.add('recording');
-  document.getElementById('ptt-icon').textContent = '⏹';
-  document.getElementById('agent-status-text').textContent = 'Recording…';
+  _setBtnState('recording');
 
   try {
     const md = navigator.mediaDevices;
@@ -541,7 +539,7 @@ async function startRecording() {
   } catch (err) {
     console.error('Mic error:', err.message);
     document.getElementById('agent-status-text').textContent = err.message.includes('mediaDevices') ? 'Use localhost:8000' : 'Mic denied — check browser settings';
-    _resetPtt();
+    _setBtnState('idle');
   }
 }
 
@@ -553,10 +551,9 @@ function stopRecording() {
   if (pttStream)    { pttStream.getTracks().forEach(t => t.stop()); pttStream = null; }
   if (audioCtx)     { audioCtx.close(); audioCtx = null; }
 
-  _resetPtt();
-
-  if (pttSamples.length < 3200) {
-    document.getElementById('agent-status-text').textContent = 'Listening…';
+  if (pttSamples.length < 16000) {  // < 1 s — skip
+    _setBtnState(_fromWake ? 'armed' : 'idle');
+    if (_fromWake) _startWakeListener();
     return;
   }
 
@@ -571,11 +568,13 @@ function stopRecording() {
 
   setAgentDot('thinking');
   document.getElementById('agent-status-text').textContent = 'Transcribing…';
-}
 
-function _resetPtt() {
-  document.getElementById('ptt-btn').classList.remove('recording');
-  document.getElementById('ptt-icon').textContent = '🎙';
+  // After wake-word triggered recording, re-arm automatically
+  if (_fromWake) {
+    setTimeout(() => { _setBtnState('armed'); _startWakeListener(); }, 1500);
+  } else {
+    _setBtnState('idle');
+  }
 }
 
 /* ── WebSocket ────────────────────────────────────────────────────────────── */
@@ -614,6 +613,87 @@ function setStatus(state) {
   label.textContent = state;
 }
 
+/* ── Voice button — three states: idle → armed → recording ───────────────── */
+//
+//  idle     → tap → armed    (wake word listener starts, button pulses green)
+//  armed    → "Hey Concierge" → recording  (auto-stop 5 s, then re-arms)
+//  armed    → tap → recording (skip wake word; goes back to idle after)
+//  recording → tap → stop
+
+let _btnState  = 'idle';
+let _wakeRecog = null;
+let _fromWake  = false;
+const WAKE_WORDS = ['concierge', 'hey concierge', 'hey car'];
+
+function _setBtnState(state) {
+  _btnState = state;
+  const btn    = document.getElementById('ptt-btn');
+  const icon   = document.getElementById('ptt-icon');
+  const status = document.getElementById('agent-status-text');
+  btn.classList.remove('recording', 'armed');
+  if (state === 'idle') {
+    icon.textContent  = '🎙';
+    btn.title         = 'Tap to speak';
+    status.textContent = 'Listening…';
+  } else if (state === 'armed') {
+    icon.textContent  = '👂';
+    btn.classList.add('armed');
+    btn.title         = 'Say "Hey Concierge" or tap to record';
+    status.textContent = 'Say "Hey Concierge"…';
+  } else if (state === 'recording') {
+    icon.textContent  = '⏹';
+    btn.classList.add('recording');
+    btn.title         = 'Tap to stop';
+    status.textContent = 'Recording…';
+  }
+}
+
+function _startWakeListener() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  _wakeRecog = new SR();
+  _wakeRecog.continuous     = true;
+  _wakeRecog.interimResults = true;
+  _wakeRecog.lang = 'en-US';
+  _wakeRecog.onresult = (e) => {
+    if (_btnState !== 'armed') return;
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript.toLowerCase().trim();
+      if (WAKE_WORDS.some(w => t.includes(w))) {
+        _stopWakeListener();
+        _fromWake = true;
+        _setBtnState('recording');
+        document.getElementById('agent-status-text').textContent = 'Wake word — speak now…';
+        setTimeout(() => startRecording(), 250);
+        setTimeout(() => { if (pttRecording) stopRecording(); }, 5000);
+        return;
+      }
+    }
+  };
+  _wakeRecog.onend  = () => { if (_btnState === 'armed') _wakeRecog.start(); };
+  _wakeRecog.onerror = (e) => { if (e.error !== 'no-speech') console.warn('wake:', e.error); };
+  try { _wakeRecog.start(); } catch (_) {}
+}
+
+function _stopWakeListener() {
+  if (_wakeRecog) { try { _wakeRecog.stop(); } catch (_) {} _wakeRecog = null; }
+}
+
+function handleVoiceBtn() {
+  if (_btnState === 'idle') {
+    _fromWake = false;
+    _setBtnState('armed');
+    _startWakeListener();
+  } else if (_btnState === 'armed') {
+    _stopWakeListener();
+    _fromWake = false;
+    _setBtnState('recording');
+    startRecording();
+  } else if (_btnState === 'recording') {
+    stopRecording();
+  }
+}
+
 /* ── Init ─────────────────────────────────────────────────────────────────── */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -644,12 +724,7 @@ document.addEventListener('DOMContentLoaded', () => {
       .catch(() => {});
   }
 
-  // Click-toggle: first click starts, second click stops
-  const pttBtn = document.getElementById('ptt-btn');
-  pttBtn.addEventListener('click', () => {
-    if (pttRecording) stopRecording();
-    else startRecording();
-  });
+  document.getElementById('ptt-btn').addEventListener('click', handleVoiceBtn);
 
   // Mute toggle
   document.getElementById('mute-btn').addEventListener('click', () => {
@@ -670,4 +745,5 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('music-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') document.getElementById('music-btn').click();
   });
+
 });
