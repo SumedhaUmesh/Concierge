@@ -107,6 +107,8 @@ async def find_poi(
                 log.info("Nominatim[%s/%s]: %d results", category, label, len(results))
 
                 for r in results:
+                    if not r or not isinstance(r, dict):
+                        continue
                     name = r.get("namedetails", {}).get("name") or r.get("display_name", "").split(",")[0]
                     if not name or len(name) < 2:
                         continue

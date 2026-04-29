@@ -285,6 +285,20 @@ html, body {
 
 .statusbar-sep { color: var(--dim); }
 
+.gps-btn {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font-family: var(--font);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0;
+  letter-spacing: 0.5px;
+  transition: color 0.2s;
+}
+.gps-btn:hover { color: var(--text); }
+.gps-btn.on { color: var(--green); }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.3; }

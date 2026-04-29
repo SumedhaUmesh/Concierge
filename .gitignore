@@ -19,3 +19,6 @@ models/*.bin
 .idea/
 .vscode/
 *.swp
+
+# Runtime data
+backend/trip_memory.db

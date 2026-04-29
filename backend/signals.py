@@ -40,6 +40,7 @@ class Signal:
     # Driver
     hours_since_meal: float = 1.5
     current_time: str = "10:00"
+    minutes_driving_continuously: float = 0.0
 
     # Route — gas station always set (nearest on route)
     next_gas_station_name: str = "Shell, Exit 14"

@@ -3,6 +3,7 @@ import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
@@ -18,6 +19,7 @@ from agent.voice import tts, asr, classifier
 from agent import llm as llm_mod, cloud as cloud_mod
 from agent.prompts import VEHICLE_QA_SYSTEM, VEHICLE_QA_USER
 import trip_memory
+import calendar_source
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -67,6 +69,35 @@ async def obd_status():
     return obd_source.status_dict()
 
 
+@app.post("/calendar/sync")
+async def calendar_sync():
+    event = await _do_calendar_sync()
+    await sim.broadcast()
+    return {"ok": True, "event": event}
+
+
+@app.get("/geocode/reverse")
+async def reverse_geocode(lat: float, lng: float):
+    """Nominatim reverse geocode — returns a short human-readable label."""
+    import aiohttp  # noqa: PLC0415
+    url = "https://nominatim.openstreetmap.org/reverse"
+    params = {"lat": lat, "lon": lng, "format": "json", "zoom": 14}
+    headers = {"User-Agent": "Concierge/1.0 (portfolio demo)"}
+    try:
+        async with aiohttp.ClientSession(headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=5)) as s:
+            async with s.get(url, params=params) as resp:
+                data = await resp.json(content_type=None)
+        addr = data.get("address", {})
+        parts = [addr.get("road") or addr.get("suburb"),
+                 addr.get("city") or addr.get("town") or addr.get("village"),
+                 addr.get("state")]
+        label = ", ".join(p for p in parts if p)
+        return {"label": label or data.get("display_name", "")[:60]}
+    except Exception:
+        return {"label": ""}
+
+
 @app.get("/memory/stats")
 async def memory_stats():
     return trip_memory.get_preferences()
@@ -84,10 +115,29 @@ async def memory_reset():
 
 @app.on_event("startup")
 async def _warmup():
-    # Load model eagerly at startup so the first gate call doesn't pay
-    # the full load latency. The lock in llm.py ensures this is safe.
     from agent.llm import get_llm  # noqa: PLC0415
     await asyncio.to_thread(get_llm)
+    asyncio.create_task(_calendar_sync_loop())
+
+
+async def _calendar_sync_loop():
+    """Sync macOS Calendar every 5 minutes in the background."""
+    while True:
+        await _do_calendar_sync()
+        await asyncio.sleep(300)
+
+
+async def _do_calendar_sync() -> Optional[dict]:
+    event = await calendar_source.get_next_event()
+    if event:
+        sim.state.next_meeting_title    = event["title"]
+        sim.state.next_meeting_time     = event["time"]
+        sim.state.next_meeting_location = event["location"] or None
+    else:
+        sim.state.next_meeting_title    = None
+        sim.state.next_meeting_time     = None
+        sim.state.next_meeting_location = None
+    return event
 
 
 @app.websocket("/ws")
@@ -135,6 +185,11 @@ async def ws_endpoint(websocket: WebSocket):
                 await sim.play(msg["scenario"])
             elif kind == "reset":
                 await sim.reset()
+            elif kind == "gps_update":
+                sim.state.lat = msg["lat"]
+                sim.state.lng = msg["lng"]
+                if msg.get("label"):
+                    sim.state.location_label = msg["label"]
             elif kind == "user_dismiss":
                 agent.dismiss()
                 if latest_suggestion:
@@ -412,6 +467,12 @@ _DEMO_HTML = """<!DOCTYPE html>
 <body>
 <h1>CONCIERGE — DEMO CONTROLS</h1>
 
+<h2>Calendar</h2>
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+  <button class="preset" onclick="syncCalendar()">Sync Now</button>
+  <span id="cal_status" style="font-size:11px;color:#888">Not synced</span>
+</div>
+
 <h2>OBD-II Live Data</h2>
 <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
   <input type="text" id="obd_port" placeholder="/dev/cu.OBDII (blank=auto)" style="flex:1">
@@ -578,6 +639,19 @@ async function applyState() {
   const data = await res.json();
   document.getElementById('status').textContent = data.ok ? '✓ Applied — dashboard updated' : '✗ Error';
   setTimeout(() => document.getElementById('status').textContent = '', 3000);
+}
+
+async function syncCalendar() {
+  const res = await fetch('/calendar/sync', { method: 'POST' });
+  const d = await res.json();
+  const el = document.getElementById('cal_status');
+  if (d.event) {
+    el.textContent = `✓ ${d.event.title} @ ${d.event.time}${d.event.location ? ' · ' + d.event.location : ''}`;
+    el.style.color = '#4ade80';
+  } else {
+    el.textContent = 'No upcoming events in next 12 h';
+    el.style.color = '#888';
+  }
 }
 
 async function loadMemory() {

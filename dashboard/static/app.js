@@ -613,6 +613,62 @@ function setStatus(state) {
   label.textContent = state;
 }
 
+/* ── Real GPS ─────────────────────────────────────────────────────────────── */
+
+let _gpsWatchId   = null;
+let _gpsActive    = false;
+let _lastGeocodeLat = null;
+let _lastGeocodeLng = null;
+
+async function _reverseGeocode(lat, lng) {
+  // Only re-geocode when position changes by >300 m
+  if (_lastGeocodeLat !== null) {
+    const dlat = lat - _lastGeocodeLat, dlng = lng - _lastGeocodeLng;
+    if (Math.sqrt(dlat*dlat + dlng*dlng) < 0.003) return null;
+  }
+  _lastGeocodeLat = lat; _lastGeocodeLng = lng;
+  try {
+    const res = await fetch(`/geocode/reverse?lat=${lat}&lng=${lng}`);
+    const d = await res.json();
+    return d.label || null;
+  } catch (_) { return null; }
+}
+
+async function _onGpsPosition(pos) {
+  const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+  const label = await _reverseGeocode(lat, lng);
+  send({ type: 'gps_update', lat, lng, label });
+  // Update GPS indicator
+  const ind = document.getElementById('gps-indicator');
+  if (ind) ind.title = `GPS ±${Math.round(accuracy)} m`;
+}
+
+function startGPS() {
+  if (!navigator.geolocation) {
+    alert('Geolocation not available in this browser.');
+    return;
+  }
+  _gpsActive = true;
+  _gpsWatchId = navigator.geolocation.watchPosition(
+    _onGpsPosition,
+    (err) => console.warn('GPS error:', err.message),
+    { enableHighAccuracy: true, maximumAge: 4000, timeout: 10000 }
+  );
+  const btn = document.getElementById('gps-btn');
+  if (btn) { btn.classList.add('on'); btn.textContent = '📍 GPS live'; }
+}
+
+function stopGPS() {
+  if (_gpsWatchId !== null) navigator.geolocation.clearWatch(_gpsWatchId);
+  _gpsWatchId = null; _gpsActive = false;
+  const btn = document.getElementById('gps-btn');
+  if (btn) { btn.classList.remove('on'); btn.textContent = '📍 GPS off'; }
+}
+
+function toggleGPS() {
+  _gpsActive ? stopGPS() : startGPS();
+}
+
 /* ── Voice button — three states: idle → armed → recording ───────────────── */
 //
 //  idle     → tap → armed    (wake word listener starts, button pulses green)
@@ -725,6 +781,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   document.getElementById('ptt-btn').addEventListener('click', handleVoiceBtn);
+  const gpsBtn = document.getElementById('gps-btn');
+  if (gpsBtn) gpsBtn.addEventListener('click', toggleGPS);
 
   // Mute toggle
   document.getElementById('mute-btn').addEventListener('click', () => {

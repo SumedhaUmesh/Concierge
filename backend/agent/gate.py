@@ -46,6 +46,7 @@ def _compact(state) -> dict:
         "traffic_delay_min": d.get("traffic_delay_minutes", 0),
         "normal_travel_min": d.get("normal_travel_minutes"),
         "next_station_km": round(d.get("next_gas_station_km", 999)),
+        "driving_min": round(d.get("minutes_driving_continuously", 0)),
     }
 
 
@@ -82,6 +83,10 @@ def _python_precheck(
     if meal_hours > 4 and is_mealtime:
         if last_type != "meal":
             return True, "driver hasn't eaten in 4+ hours during mealtime — suggest a nearby restaurant (type=meal)"
+
+    driving_min = s.get("driving_min", 0)
+    if driving_min >= 90 and last_type != "rest":
+        return True, f"driver has been driving {driving_min:.0f} minutes continuously — suggest a rest stop (type=rest)"
 
     return None, None  # let the LLM handle schedule / ambiguous cases
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional, Set
@@ -15,6 +16,7 @@ class Simulator:
         self._clients: Set[Any] = set()
         self._agents: list = []
         self._task: Optional[asyncio.Task] = None
+        self._last_broadcast: float = time.monotonic()
 
     # ── Client management ────────────────────────────────────────────────────
 
@@ -38,6 +40,15 @@ class Simulator:
     async def broadcast(self):
         if not self._clients:
             return
+        # Track continuous driving time
+        now = time.monotonic()
+        elapsed_min = (now - self._last_broadcast) / 60.0
+        self._last_broadcast = now
+        if self.state.speed_kmh > 30:
+            self.state.minutes_driving_continuously += elapsed_min
+        else:
+            self.state.minutes_driving_continuously = 0.0
+
         # Overlay real OBD-II readings on top of simulated state
         try:
             from obd_source import obd_source

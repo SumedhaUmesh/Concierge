@@ -8,6 +8,7 @@ them into the generator prompt so suggestions become personalised over time.
 
 import datetime
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -36,12 +37,20 @@ def _get_conn() -> sqlite3.Connection:
                 type        TEXT    NOT NULL,
                 headline    TEXT,
                 place_name  TEXT,
+                place_lat   REAL,
+                place_lng   REAL,
                 cuisine     TEXT,
                 hour        INTEGER,
                 day_of_week INTEGER,
                 outcome     TEXT    NOT NULL
             )
         """)
+        # Migrate older DBs that lack the lat/lng columns
+        for col in ("place_lat REAL", "place_lng REAL"):
+            try:
+                _conn.execute(f"ALTER TABLE suggestions ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         _conn.commit()
     return _conn
 
@@ -71,6 +80,8 @@ def log_outcome(suggestion, outcome: str, state=None) -> None:
 
     enriched = s.get("enriched_action") or {}
     place_name = enriched.get("place_name") if isinstance(enriched, dict) else None
+    place_lat  = enriched.get("lat")  if isinstance(enriched, dict) else None
+    place_lng  = enriched.get("lng")  if isinstance(enriched, dict) else None
 
     # Extract cuisine from meal detail ("Italian · 1.2 km away" → "Italian")
     cuisine: Optional[str] = None
@@ -82,10 +93,10 @@ def log_outcome(suggestion, outcome: str, state=None) -> None:
         conn = _get_conn()
         conn.execute(
             "INSERT INTO suggestions "
-            "(ts, type, headline, place_name, cuisine, hour, day_of_week, outcome) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(ts, type, headline, place_name, place_lat, place_lng, cuisine, hour, day_of_week, outcome) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (now, s.get("type", ""), s.get("headline", ""),
-             place_name, cuisine, hour, dow, outcome),
+             place_name, place_lat, place_lng, cuisine, hour, dow, outcome),
         )
         conn.commit()
 
@@ -151,7 +162,7 @@ def get_preferences() -> dict:
         """).fetchone()
 
     total = totals["total"] if totals else 0
-    accepted = totals["accepted"] if totals else 0
+    accepted = totals["accepted"] or 0  # SUM returns NULL when no rows match
     return {
         "preferred_cuisines": preferred_cuisines,
         "avoided_cuisines": avoided_cuisines,
@@ -187,6 +198,48 @@ def get_context_string() -> Optional[str]:
         return None
 
     return "Driver preferences (from trip history):\n" + "\n".join(f"- {l}" for l in lines)
+
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def get_nearby_accepted_place(lat: float, lng: float, radius_km: float = 0.5) -> Optional[dict]:
+    """
+    Return the closest accepted-navigation place within radius_km, or None.
+    Used by AgentLoop to fire geofenced proactive suggestions.
+    """
+    with _lock:
+        conn = _get_conn()
+        rows = conn.execute("""
+            SELECT place_name, place_lat, place_lng, type, COUNT(*) AS visits
+            FROM suggestions
+            WHERE outcome = 'accepted'
+              AND place_lat IS NOT NULL
+              AND place_lng IS NOT NULL
+            GROUP BY place_name
+            HAVING visits >= 1
+        """).fetchall()
+
+    best = None
+    best_dist = float("inf")
+    for row in rows:
+        dist = _haversine(lat, lng, row["place_lat"], row["place_lng"])
+        if dist <= radius_km and dist < best_dist:
+            best_dist = dist
+            best = {
+                "name": row["place_name"],
+                "lat": row["place_lat"],
+                "lng": row["place_lng"],
+                "type": row["type"],
+                "visits": row["visits"],
+                "distance_km": round(dist, 2),
+            }
+    return best
 
 
 def _compress_hours(hours: list) -> str:

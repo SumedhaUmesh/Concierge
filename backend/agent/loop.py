@@ -17,9 +17,10 @@ from signals import Signal, Suggestion
 
 log = logging.getLogger(__name__)
 
-GATE_INTERVAL_SEC = 3       # minimum seconds between gate checks
-COOLDOWN_SEC      = 180     # seconds of silence after a suggestion fires
-WINDOW_SIZE       = 3       # how many ticks to keep in the state window
+GATE_INTERVAL_SEC    = 3    # minimum seconds between gate checks
+COOLDOWN_SEC         = 180  # seconds of silence after a suggestion fires
+WINDOW_SIZE          = 3    # how many ticks to keep in the state window
+GEOFENCE_COOLDOWN    = 600  # seconds before re-triggering the same place
 
 
 class AgentLoop:
@@ -38,6 +39,9 @@ class AgentLoop:
         self._dismissed_at: float = 0.0
 
         self._running_task: Optional[asyncio.Task] = None
+
+        self._last_geofence_name: Optional[str] = None
+        self._last_geofence_at: float = 0.0
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -60,6 +64,9 @@ class AgentLoop:
         # Don't stack inference tasks
         if self._running_task and not self._running_task.done():
             return
+
+        # Geofence check — proactively surface known nearby places
+        self._check_geofence(state, now)
 
         self._last_gate_at = now
         self._running_task = asyncio.create_task(self._run_inference())
@@ -97,6 +104,31 @@ class AgentLoop:
             log.exception("on_suggestion callback failed (forced)")
 
     # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _check_geofence(self, state: Signal, now: float) -> None:
+        """Fire a proactive suggestion when approaching a previously visited place."""
+        import trip_memory  # noqa: PLC0415
+        place = trip_memory.get_nearby_accepted_place(state.lat, state.lng, radius_km=0.5)
+        if not place:
+            return
+        same_place = place["name"] == self._last_geofence_name
+        cooldown_ok = (now - self._last_geofence_at) > GEOFENCE_COOLDOWN
+        suggestion_ok = (now - self._last_suggestion_at) > COOLDOWN_SEC
+        if same_place and not cooldown_ok:
+            return
+        if not suggestion_ok:
+            return
+        self._last_geofence_name = place["name"]
+        self._last_geofence_at = now
+        visits = place["visits"]
+        trigger = (
+            f"driver is {place['distance_km']} km from {place['name']}, "
+            f"a place they've visited {visits} time{'s' if visits != 1 else ''} before "
+            f"— suggest stopping (type={place['type']})"
+        )
+        log.info("Geofence: near %s (%.2f km)", place["name"], place["distance_km"])
+        if not (self._running_task and not self._running_task.done()):
+            self._running_task = asyncio.create_task(self._run_forced(trigger))
 
     async def _run_inference(self) -> None:
         if len(self._window) == 0:
