@@ -21,7 +21,7 @@ NOMINATIM_HEADERS = {"User-Agent": "Concierge/1.0 (portfolio demo)"}
 _CATEGORY_AMENITIES = {
     "fuel":  ["fuel"],
     "food":  ["restaurant", "cafe", "fast_food", "food_court", "ice_cream", "bar", "pub"],
-    "rest":  ["rest_area", "services"],
+    "rest":  ["rest_area", "services", "parking", "cafe", "fast_food"],
 }
 
 # Free-text q= terms added on top of amenity search (for shop= OSM tags)

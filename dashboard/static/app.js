@@ -47,15 +47,15 @@ function initMap() {
     maxZoom: 19,
   }).addTo(map);
 
-  carMarker      = makeMarker('map-car',      [34.0268, -118.3964]).addTo(map);
-  stationMarker  = makeMarker('map-station',  [34.0268, -118.3964]);
-  restStopMarker = makeMarker('map-rest-stop',[34.0268, -118.3964]);
-  destMarker     = makeMarker('map-dest',     [34.0268, -118.3964]);
-  enrichedMarker = makeMarker('map-enriched', [34.0268, -118.3964]);
+  carMarker      = makeMarker('map-car',      [34.0268, -118.3964], '🚗 You').addTo(map);
+  stationMarker  = makeMarker('map-station',  [34.0268, -118.3964], '⛽ Gas');
+  restStopMarker = makeMarker('map-rest-stop',[34.0268, -118.3964], '🛑 Rest');
+  destMarker     = makeMarker('map-dest',     [34.0268, -118.3964], '📍 Dest');
+  enrichedMarker = makeMarker('map-enriched', [34.0268, -118.3964], '');
 }
 
-function makeMarker(className, latlng) {
-  return L.marker(latlng, {
+function makeMarker(className, latlng, label) {
+  const m = L.marker(latlng, {
     icon: L.divIcon({
       className: '',
       html: `<div class="${className}"></div>`,
@@ -63,6 +63,15 @@ function makeMarker(className, latlng) {
       iconAnchor: [7, 7],
     }),
   });
+  if (label) {
+    m.bindTooltip(label, {
+      permanent: true,
+      direction: 'top',
+      offset: [0, -10],
+      className: 'map-label',
+    });
+  }
+  return m;
 }
 
 function setMarker(marker, lat, lng, show) {
@@ -170,9 +179,14 @@ function onSignal(s) {
 
   if (map) {
     carMarker.setLatLng([s.lat, s.lng]);
-    map.panTo([s.lat, s.lng], { animate: true, duration: 0.6 });
+    const currentCenter = map.getCenter();
+    const dlat = Math.abs(s.lat - currentCenter.lat);
+    const dlng = Math.abs(s.lng - currentCenter.lng);
+    if (dlat > 0.0005 || dlng > 0.0005) {  // ~50m threshold — avoid jitter on static scenarios
+      map.panTo([s.lat, s.lng], { animate: true, duration: 0.6 });
+    }
 
-    setMarker(stationMarker, s.next_gas_station_lat, s.next_gas_station_lng, true);
+    setMarker(stationMarker, s.next_gas_station_lat, s.next_gas_station_lng, s.fuel_percent < 30);
     setMarker(restStopMarker, s.next_rest_stop_lat, s.next_rest_stop_lng,
               s.next_rest_stop_km != null);
     setMarker(destMarker, s.destination_lat, s.destination_lng,
@@ -201,7 +215,8 @@ function setStatusVal(id, text, warn) {
 function setDriverBar(id, value) {
   const fill = document.getElementById(id);
   if (!fill) return;
-  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+  const v = (value == null || isNaN(value)) ? 0 : value;
+  const pct = Math.round(Math.max(0, Math.min(1, v)) * 100);
   fill.style.width = pct + '%';
   fill.className = 'ds-fill' + (pct > 65 ? ' ds-fill-high' : pct > 35 ? ' ds-fill-mid' : '');
 }
@@ -221,9 +236,7 @@ function onSuggestion(s) {
   document.getElementById('agent-status-text').textContent = 'Suggestion';
 
   const card = document.getElementById('suggestion-card');
-  const idle = document.getElementById('agent-idle');
   card.style.display = 'block';
-  idle.style.display = 'flex';
 
   // Remove urgency classes
   card.className = 'suggestion-card';
@@ -243,9 +256,14 @@ function onSuggestion(s) {
     actionBtn.textContent = s.enriched_action.label || 'Act';
     actionBtn.onclick = () => handleAction(s.enriched_action);
 
-    // Pin enriched POI on map
+    // Pin enriched POI on map with label
     if (s.enriched_action.lat && s.enriched_action.lng) {
       setMarker(enrichedMarker, s.enriched_action.lat, s.enriched_action.lng, true);
+      const poiLabel = s.enriched_action.place_name || s.enriched_action.label || '📍';
+      enrichedMarker.unbindTooltip();
+      enrichedMarker.bindTooltip(poiLabel, {
+        permanent: true, direction: 'top', offset: [0, -10], className: 'map-label',
+      });
     }
   } else {
     actionRow.style.display = 'none';
@@ -259,15 +277,40 @@ function handleAction(action) {
     send({ type: 'user_accept' });
   } else if (action.type === 'cabin_action') {
     send({ type: 'user_accept', action: action.action });
+  } else if (action.type === 'info') {
+    send({ type: 'user_accept' });
   }
+  // Hide card and marker immediately — don't wait for server echo
+  document.getElementById('suggestion-card').style.display = 'none';
+  document.getElementById('agent-idle').style.display = 'flex';
+  setMarker(enrichedMarker, 0, 0, false);
+  setAgentDot('idle');
+  document.getElementById('agent-status-text').textContent = 'Listening…';
 }
 
 function dismissSuggestion() {
   document.getElementById('suggestion-card').style.display = 'none';
+  document.getElementById('agent-idle').style.display = 'flex';
   setAgentDot('idle');
   document.getElementById('agent-status-text').textContent = 'Listening…';
   setMarker(enrichedMarker, 0, 0, false);
   send({ type: 'user_dismiss' });
+}
+
+function resetUI() {
+  // Called on /sim/reset — clear all ephemeral UI state
+  document.getElementById('suggestion-card').style.display = 'none';
+  document.getElementById('agent-idle').style.display = 'flex';
+  setMarker(enrichedMarker, 0, 0, false);
+  setAgentDot('idle');
+  document.getElementById('agent-status-text').textContent = 'Listening…';
+  document.getElementById('quiet-mode-badge').style.display = 'none';
+  // Clear music/meal list
+  document.getElementById('music-section').style.display = 'none';
+  document.getElementById('music-tracks').innerHTML = '';
+  // Stop any playing audio
+  if (_autoPlayTimer) { clearTimeout(_autoPlayTimer); _autoPlayTimer = null; }
+  stopTrack();
 }
 
 function setAgentDot(state) {
@@ -342,6 +385,14 @@ const player = {
     this.oscs = [root, fifth, oct, lfo];
   },
 
+  pause() {
+    if (this.ctx && this.ctx.state === 'running') this.ctx.suspend();
+  },
+
+  resume() {
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+  },
+
   stop() {
     if (!this.ctx) return;
     const g = this.masterGain;
@@ -360,6 +411,8 @@ const player = {
 };
 
 let _previewAudio = null;
+let _pausedForVoice = false;
+let _voiceAudioRef  = null;
 
 function _setPauseBtn(icon) {
   const btn = document.getElementById('pause-btn');
@@ -367,9 +420,11 @@ function _setPauseBtn(icon) {
 }
 
 async function playTrack(track) {
-  // Stop any previous audio
+  // Stop any previous audio; cancel pending voice-resume
   if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
   player.stop();
+  _pausedForVoice = false;
+  _voiceAudioRef  = null;
 
   // Start synth immediately as placeholder
   player.play(track);
@@ -388,11 +443,12 @@ async function playTrack(track) {
     const data = await res.json();
     const hit = data.results.find(r => r.previewUrl);
     if (hit) {
-      player.stop();  // fade out synth
+      player.stop();  // fade out synth (also hides bar — re-show below)
       _previewAudio = new Audio(hit.previewUrl);
       _previewAudio.volume = 0.7;
       _previewAudio.play();
       _setPauseBtn('⏸');
+      document.getElementById('now-playing').style.display = 'flex';
       document.getElementById('now-playing-title').textContent =
         `${hit.trackName} — ${hit.artistName}`;
       _previewAudio.onended = () => {
@@ -420,9 +476,14 @@ function togglePause() {
       _previewAudio.pause();
       _setPauseBtn('▶');
     }
-  } else {
-    // Synth only — no pause support, treat as stop
-    stopTrack();
+  } else if (player.ctx) {
+    if (player.ctx.state === 'suspended') {
+      player.resume();
+      _setPauseBtn('⏸');
+    } else {
+      player.pause();
+      _setPauseBtn('▶');
+    }
   }
 }
 
@@ -435,20 +496,35 @@ function stopTrack() {
 
 /* ── Music handler ────────────────────────────────────────────────────────── */
 
+let _transcriptTimer = null;
 function onTranscript(data) {
   const row = document.getElementById('transcript-row');
   const txt = document.getElementById('transcript-text');
+  if (_transcriptTimer) { clearTimeout(_transcriptTimer); _transcriptTimer = null; }
   row.style.display = 'block';
   txt.textContent = `"${data.text}"`;
   setAgentDot('active');
   document.getElementById('agent-status-text').textContent = 'Heard';
-  setTimeout(() => { row.style.display = 'none'; }, 5000);
+  _transcriptTimer = setTimeout(() => { row.style.display = 'none'; _transcriptTimer = null; }, 5000);
 }
 
+function onModeChange(data) {
+  const badge = document.getElementById('quiet-mode-badge');
+  if (!badge) return;
+  if (data.mode === 'quiet') {
+    badge.textContent = '🔇 QUIET MODE' + (data.reason ? '  —  ' + data.reason : '');
+    badge.style.display = 'block';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+let _autoPlayTimer = null;
 function onMusicResults(data) {
   const section = document.getElementById('music-section');
   const list    = document.getElementById('music-tracks');
   section.style.display = 'block';
+  if (_autoPlayTimer) { clearTimeout(_autoPlayTimer); _autoPlayTimer = null; }
   list.innerHTML = '';
 
   // If the query looks like a specific song ("X by Y"), offer a direct iTunes search first
@@ -472,7 +548,7 @@ function onMusicResults(data) {
     list.appendChild(direct);
   }
 
-  data.tracks.forEach(t => {
+  data.tracks.forEach((t, idx) => {
     const div = document.createElement('div');
     div.className = 'music-track';
     div.title = 'Click to play';
@@ -490,6 +566,17 @@ function onMusicResults(data) {
       playTrack(t);
     });
     list.appendChild(div);
+
+    // Auto-play first track after TTS reply finishes
+    if (idx === 0 && data.auto_play) {
+      const delay = data.delay_ms || 300;
+      _autoPlayTimer = setTimeout(() => {
+        _autoPlayTimer = null;
+        div.classList.add('playing');
+        div.querySelector('.music-track-play').textContent = '♪';
+        playTrack(t);
+      }, delay);
+    }
   });
 }
 
@@ -541,6 +628,18 @@ function onMealOptions(data) {
   hdr.textContent = '🍽 NEARBY RESTAURANTS';
   list.appendChild(hdr);
 
+  // Show the spoken question visually so user knows what to say
+  if (data.question) {
+    const q = document.createElement('div');
+    q.style.cssText = 'font-size:11px;color:#94a3b8;margin-bottom:8px;line-height:1.4;';
+    q.textContent = data.question;
+    list.appendChild(q);
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:10px;color:#4ade80;margin-bottom:8px;';
+    hint.textContent = '🎙 Say a cuisine or tap a restaurant below';
+    list.appendChild(hint);
+  }
+
   data.pois.forEach(p => {
     const div = document.createElement('div');
     div.className = 'music-track';
@@ -554,7 +653,14 @@ function onMealOptions(data) {
     div.addEventListener('click', () => {
       document.querySelectorAll('.music-track').forEach(el => el.classList.remove('playing'));
       div.classList.add('playing');
+      div.querySelector('.music-track-play').textContent = '✓';
+      // Pin the chosen restaurant on the map
       if (p.lat && p.lng) {
+        setMarker(enrichedMarker, p.lat, p.lng, true);
+        enrichedMarker.unbindTooltip();
+        enrichedMarker.bindTooltip(p.name, {
+          permanent: true, direction: 'top', offset: [0, -10], className: 'map-label',
+        });
         const url = `https://maps.google.com/?q=${p.lat},${p.lng}`;
         window.open(url, '_blank');
       }
@@ -597,6 +703,17 @@ function encodeWAV(samples, sampleRate) {
 }
 
 async function startRecording() {
+  // Pause all music while the user speaks
+  if (_previewAudio && !_previewAudio.paused) {
+    _previewAudio.pause();
+    _voiceAudioRef  = _previewAudio;
+    _pausedForVoice = true;
+  } else if (player.ctx && player.ctx.state === 'running') {
+    player.pause();
+    _pausedForVoice = true;
+    _voiceAudioRef  = null;  // synth — no ref needed
+  }
+
   pttSamples = [];
   pttRecording = true;
   _setBtnState('recording');
@@ -629,6 +746,20 @@ function stopRecording() {
   if (pttProcessor) { pttProcessor.disconnect(); pttProcessor = null; }
   if (pttStream)    { pttStream.getTracks().forEach(t => t.stop()); pttStream = null; }
   if (audioCtx)     { audioCtx.close(); audioCtx = null; }
+
+  // Resume music after voice — wait for TTS reply + possible new track before deciding
+  if (_pausedForVoice) {
+    setTimeout(() => {
+      if (!_pausedForVoice) return;  // already handled (new track started)
+      if (_previewAudio && _previewAudio === _voiceAudioRef) {
+        _previewAudio.play();
+      } else if (!_voiceAudioRef && player.ctx && player.ctx.state === 'suspended') {
+        player.resume();
+      }
+      _pausedForVoice = false;
+      _voiceAudioRef  = null;
+    }, 2500);
+  }
 
   if (pttSamples.length < 16000) {  // < 1 s — skip
     _setBtnState(_fromWake ? 'armed' : 'idle');
@@ -676,8 +807,16 @@ function connect() {
     else if (msg.type === 'music_results') onMusicResults(msg.data);
     else if (msg.type === 'meal_options')  onMealOptions(msg.data);
     else if (msg.type === 'transcript')    onTranscript(msg.data);
-    else if (msg.type === 'user_accept')   { document.getElementById('suggestion-card').style.display = 'none'; setAgentDot(''); }
+    else if (msg.type === 'mode_change')   onModeChange(msg.data);
+    else if (msg.type === 'user_accept')   {
+      document.getElementById('suggestion-card').style.display = 'none';
+      document.getElementById('agent-idle').style.display = 'flex';
+      setMarker(enrichedMarker, 0, 0, false);
+      setAgentDot('idle');
+      document.getElementById('agent-status-text').textContent = 'Listening…';
+    }
     else if (msg.type === 'user_dismiss')  dismissSuggestion();
+    else if (msg.type === 'reset_ui')      resetUI();
   };
 }
 
@@ -816,9 +955,10 @@ function _stopWakeListener() {
 
 function handleVoiceBtn() {
   if (_btnState === 'idle') {
+    // Tap once → record immediately (no armed/wake-word step)
     _fromWake = false;
-    _setBtnState('armed');
-    _startWakeListener();
+    _setBtnState('recording');
+    startRecording();
   } else if (_btnState === 'armed') {
     _stopWakeListener();
     _fromWake = false;

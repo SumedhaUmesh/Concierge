@@ -17,15 +17,41 @@ from signals import Signal, Suggestion
 log = logging.getLogger(__name__)
 
 
+_TYPE_ACTION_OVERRIDE = {
+    "cabin":    "check_weather",
+    "range":    "find_poi:fuel",
+    "meal":     "find_poi:food",
+    "rest":     "find_poi:rest",
+    "schedule": "none",
+    "music":    "none",
+}
+
+
 async def enrich(suggestion: Suggestion, state: Signal) -> Suggestion:
     """
     Fill in suggestion.enriched_action based on suggestion.suggested_action.
     Returns the same suggestion object (mutated in place) for convenience.
     """
-    action = suggestion.suggested_action
+    # Small LLM sometimes picks the wrong suggested_action — override by type.
+    action = _TYPE_ACTION_OVERRIDE.get(suggestion.type, suggestion.suggested_action)
 
     if action.startswith("find_poi:"):
         category = action.split(":", 1)[1]
+
+        # Rest stop: use the pre-computed state fields first — avoids unreliable
+        # Nominatim search for "rest_area" tags which rarely exist in urban areas.
+        if category == "rest" and state.next_rest_stop_lat and state.next_rest_stop_lng:
+            km = round(state.next_rest_stop_km or 0)
+            suggestion.enriched_action = {
+                "type": "navigate",
+                "label": f"Navigate to rest stop ({km} km)",
+                "lat": state.next_rest_stop_lat,
+                "lng": state.next_rest_stop_lng,
+            }
+            suggestion.headline = f"Rest stop {km} km ahead — take a break"
+            suggestion.detail = "You've been driving for over 2 hours. Pull over and recharge."
+            log.info("enrich[rest]: using state rest stop (%.1f km)", state.next_rest_stop_km or 0)
+            return suggestion
 
         # Fetch route if destination is known, so POIs are on-the-way not just nearby
         route = None
@@ -38,18 +64,23 @@ async def enrich(suggestion: Suggestion, state: Signal) -> Suggestion:
 
         if not pois:
             log.info("enrich: no POIs found for %s", category)
+            if category == "rest":
+                suggestion.enriched_action = {
+                    "type": "info",
+                    "label": "Pull over safely and take a break",
+                }
             return suggestion
 
         # For fuel: prefer a station reachable within range
         if category == "fuel":
-            reachable = [p for p in pois if p.distance_km < state.range_km * 0.8]
+            reachable = [p for p in pois if p.distance_km < (state.range_km or 999) * 0.8]
             best = reachable[0] if reachable else pois[0]
         else:
             best = pois[0]
 
         suggestion.enriched_action = {
             "type": "navigate",
-            "label": f"Navigate to {best.name}",
+            "label": f"Open in Google Maps — {best.name}",
             "place_name": best.name,
             "distance_km": best.distance_km,
             "lat": best.lat,

@@ -116,20 +116,25 @@
           </div>
         </div>
 
+        <!-- Quiet mode badge — shown during conference call mode -->
+        <div id="quiet-mode-badge" class="quiet-mode-badge" style="display:none"></div>
+
         <!-- Single voice button: idle → armed → recording -->
         <button id="ptt-btn" class="ptt-btn" title="Tap to speak / say Hey Concierge">
           <span id="ptt-icon">🎙</span>
         </button>
       </div>
 
-      <!-- Music query -->
+      <!-- Now-playing bar — lives outside music-section so it's always visible -->
+      <div id="now-playing" style="display:none" class="now-playing-bar">
+        <button id="pause-btn" class="stop-btn" onclick="togglePause()" title="Pause / Resume">⏸</button>
+        <span id="now-playing-title"></span>
+        <button class="stop-btn" onclick="stopTrack()" title="Stop">■</button>
+      </div>
+
+      <!-- Music track list -->
       <div id="music-section" style="display:none">
         <div class="section-label" style="margin-top:14px">MUSIC</div>
-        <div id="now-playing" style="display:none" class="now-playing-bar">
-          <button id="pause-btn" class="stop-btn" onclick="togglePause()" title="Pause / Resume">⏸</button>
-          <span id="now-playing-title"></span>
-          <button class="stop-btn" onclick="stopTrack()" title="Stop">■</button>
-        </div>
         <div id="music-tracks" class="music-list"></div>
       </div>
 

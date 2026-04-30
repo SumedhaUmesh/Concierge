@@ -1,9 +1,9 @@
 """
 TTS via macOS `say`.
 
-Uses the neural voice "Flo (English (US))" when available (macOS 13+),
-falls back to Samantha. Neural voices sound noticeably cleaner and are
-the same engine Apple uses in Siri on device.
+Preference order: Eddy → Flo → Samantha.
+Eddy (English (US)) is one of Apple's newer neural voices — clear and natural,
+well-suited for a concierge. Falls back gracefully on older macOS.
 """
 
 import asyncio
@@ -12,29 +12,34 @@ import subprocess
 
 log = logging.getLogger(__name__)
 
-_PREFERRED = "Flo (English (US))"
-_FALLBACK  = "Samantha"
-_RATE      = 185   # words per minute; default is 175
+_PREFERRED_LIST = [
+    "Eddy (English (US))",   # best natural male neural voice
+    "Flo (English (US))",    # natural female neural voice
+    "Samantha",              # classic fallback (always present)
+]
+_RATE = 185   # words per minute; default is 175
 
 _muted = False
-_voice: str = _FALLBACK   # resolved at startup
+_voice: str = "Samantha"   # resolved at startup by init()
 _queue: asyncio.Queue = asyncio.Queue()
 _worker_started = False
 
 
 def _resolve_voice() -> str:
-    """Pick neural voice if installed, otherwise fall back."""
+    """Pick the first available voice from the preference list."""
     try:
         result = subprocess.run(
             ["say", "-v", "?"], capture_output=True, text=True, timeout=5
         )
-        if _PREFERRED in result.stdout:
-            log.info("TTS: using neural voice %r", _PREFERRED)
-            return _PREFERRED
+        installed = result.stdout
+        for candidate in _PREFERRED_LIST:
+            if candidate in installed:
+                log.info("TTS: using voice %r", candidate)
+                return candidate
     except Exception:
         pass
-    log.info("TTS: neural voice not installed, using %r", _FALLBACK)
-    return _FALLBACK
+    log.info("TTS: could not enumerate voices, using Samantha")
+    return "Samantha"
 
 
 def init():

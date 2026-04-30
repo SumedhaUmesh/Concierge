@@ -58,6 +58,24 @@ async def agent_reset():
     return {"ok": True, "agents_reset": len(sim._agents)}
 
 
+@app.post("/sim/reset")
+async def sim_reset():
+    """Hard reset: restore all simulator state to defaults and clear agent streaks."""
+    await sim.reset()
+    for agent in sim._agents:
+        agent.reset_cooldown()
+        agent._accept_streak  = 0
+        agent._dismiss_streak = 0
+        agent._adaptive_cooldown = 180.0
+        agent.driver_trust    = 0.5
+    # Clear POI cache so next scenario fetches fresh results
+    from agent.tools import poi as _poi_mod  # noqa: PLC0415
+    _poi_mod._cache.clear()
+    # Tell all JS clients to reset their UI state (clear music, meal, markers)
+    await _broadcast_ws_all({"type": "reset_ui"})
+    return {"ok": True}
+
+
 @app.post("/obd/connect")
 async def obd_connect(body: dict = {}):
     port = body.get("port")  # None = auto-detect
@@ -192,6 +210,8 @@ async def _warmup():
     asyncio.create_task(_broadcast_loop())
     asyncio.create_task(_calendar_sync_loop())
     asyncio.create_task(_weather_loop())
+    asyncio.create_task(_music_evolution_loop())
+    asyncio.create_task(_meeting_watch_loop())
 
 
 async def _broadcast_loop():
@@ -246,6 +266,141 @@ async def _do_weather_update():
         log.exception("Weather update failed")
 
 
+async def _broadcast_ws_all(msg: dict) -> None:
+    """Send an arbitrary JSON message to every connected WebSocket client in parallel."""
+    if not sim._clients:
+        return
+    payload = json.dumps(msg)
+    clients = list(sim._clients)
+
+    async def _send(ws):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            sim._clients.discard(ws)
+
+    await asyncio.gather(*[_send(ws) for ws in clients], return_exceptions=True)
+
+
+# ── Continuous Adaptation: Dynamic Music Evolution ────────────────────────────
+
+_last_music_energy: int = 0
+
+
+async def _music_evolution_loop():
+    """Re-evaluate music energy every 5 min as fatigue changes.
+
+    Low fatigue → calm music; high fatigue → energetic music to fight sleepiness.
+    Only fires if the target energy shifts by ≥2 from the last sent energy.
+    """
+    global _last_music_energy
+    await asyncio.sleep(60)  # let everything settle before first eval
+    while True:
+        await asyncio.sleep(300)  # 5-minute cycle
+        if not sim._clients:
+            continue
+
+        fatigue = sim.state.fatigue_index
+        if fatigue < 0.3:
+            target_energy, mood, msg = 3, "calm relaxed", "Keeping things calm and easy."
+        elif fatigue < 0.5:
+            target_energy, mood, msg = 4, "smooth upbeat", "Shifting to something a little more upbeat to keep you fresh."
+        elif fatigue < 0.7:
+            target_energy, mood, msg = 6, "upbeat energetic", "Boosting the energy a bit — you've been driving a while."
+        elif fatigue < 0.85:
+            target_energy, mood, msg = 7, "energetic driving", "Bringing up the energy to help you stay alert."
+        else:
+            target_energy, mood, msg = 8, "driving pumped",  "High-energy music — let's keep you awake and focused."
+
+        if abs(target_energy - _last_music_energy) < 2:
+            continue  # not a meaningful shift — skip
+
+        _last_music_energy = target_energy
+        tracks = music_mod.quick_match(mood, target_energy)
+        if not tracks:
+            continue
+
+        log.info("Music evolution: fatigue=%.2f → energy=%d mood=%r", fatigue, target_energy, mood)
+        await _broadcast_ws_all({
+            "type": "music_results",
+            "data": {"query": mood, "tracks": tracks},
+        })
+        asyncio.create_task(tts.speak(msg))
+
+
+# ── Continuous Adaptation: Conference Call Mode ───────────────────────────────
+
+_call_mode_active: bool = False
+
+
+async def _meeting_watch_loop():
+    """Enter quiet mode 5 min before next calendar meeting, restore after."""
+    global _call_mode_active
+    await asyncio.sleep(30)  # initial delay
+    while True:
+        await asyncio.sleep(30)
+        try:
+            meeting_time = sim.state.next_meeting_time
+            if not meeting_time:
+                if _call_mode_active:
+                    await _exit_call_mode()
+                continue
+
+            def _hhmm_to_min(t: str) -> int:
+                h, m = t.split(":", 1)
+                return int(h) * 60 + int(m)
+
+            now_min = _hhmm_to_min(sim.state.current_time)
+            mtg_min = _hhmm_to_min(meeting_time)
+            minutes_until = mtg_min - now_min
+
+            if 0 < minutes_until <= 5 and not _call_mode_active:
+                await _enter_call_mode(round(minutes_until))
+            elif _call_mode_active and (minutes_until <= 0 or minutes_until > 5):
+                await _exit_call_mode()
+        except Exception:
+            log.exception("Meeting watch loop error")
+
+
+async def _enter_call_mode(minutes_until: int) -> None:
+    global _call_mode_active
+    _call_mode_active = True
+    log.info("Conference call mode: entering (meeting in %d min)", minutes_until)
+
+    # Enqueue speech *before* muting so it still plays
+    await tts.speak(
+        f"Entering quiet mode — you have a meeting in {minutes_until} minute{'s' if minutes_until != 1 else ''}."
+    )
+    tts.set_muted(True)
+
+    # Suppress proactive alerts during the call window
+    for agent in sim._agents:
+        agent.suppress(60)
+
+    # Close windows and turn on AC for a quiet cabin
+    sim.state.windows_open = False
+    sim.state.sunroof_open = False
+    sim.state.ac_on        = True
+    await sim.broadcast()
+
+    await _broadcast_ws_all({
+        "type": "mode_change",
+        "data": {"mode": "quiet", "reason": f"Meeting in {minutes_until} min"},
+    })
+
+
+async def _exit_call_mode() -> None:
+    global _call_mode_active
+    _call_mode_active = False
+    log.info("Conference call mode: exiting")
+    tts.set_muted(False)
+    asyncio.create_task(tts.speak("Quiet mode ended. Welcome back."))
+    await _broadcast_ws_all({
+        "type": "mode_change",
+        "data": {"mode": "normal"},
+    })
+
+
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -263,10 +418,30 @@ async def ws_endpoint(websocket: WebSocket):
     convo = ConversationBuffer()
 
     async def _on_suggestion(suggestion: Suggestion):
-        try:
-            await enrich(suggestion, sim.state)
-        except Exception:
-            log.exception("Tool enrichment failed")
+        # Rest stop: fill from state coords and skip enrich entirely — Nominatim
+        # rarely has "rest_area" tags in urban areas, so bypass it completely.
+        if (suggestion.type == "rest"
+                and sim.state.next_rest_stop_lat
+                and sim.state.next_rest_stop_lng):
+            km = round(sim.state.next_rest_stop_km or 0)
+            suggestion.enriched_action = {
+                "type": "navigate",
+                "label": f"Open in Google Maps ({km} km)",
+                "lat": sim.state.next_rest_stop_lat,
+                "lng": sim.state.next_rest_stop_lng,
+            }
+            suggestion.headline = f"Rest stop {km} km ahead — take a break"
+            suggestion.detail   = "You've been driving over 2 hours. Pull over and recharge."
+            log.info("_on_suggestion: rest stop pinned (%.3f, %.3f)",
+                     sim.state.next_rest_stop_lat, sim.state.next_rest_stop_lng)
+        elif suggestion.enriched_action:
+            # Already enriched (e.g. from _handle_meal_preference) — don't overwrite
+            log.info("_on_suggestion: enriched_action already set, skipping enrich()")
+        else:
+            try:
+                await enrich(suggestion, sim.state)
+            except Exception:
+                log.exception("Tool enrichment failed")
 
         latest_suggestion.clear()
         latest_suggestion.append(suggestion)
@@ -298,10 +473,12 @@ async def ws_endpoint(websocket: WebSocket):
                     sim.state.location_label = msg["label"]
             elif kind == "user_dismiss":
                 agent.dismiss()
+                pending_meal_pois.clear()  # abort any in-progress meal flow
                 if latest_suggestion:
                     trip_memory.log_outcome(latest_suggestion[0], "dismissed", sim.state)
             elif kind == "user_accept":
                 agent.accept()
+                pending_meal_pois.clear()  # meal flow completed
                 # Apply cabin state changes immediately
                 cabin_action = msg.get("action")
                 if cabin_action in ("close_windows", "close_windows_ac"):
@@ -447,6 +624,24 @@ async def _handle_hungry(
         pass
 
 
+# Maps food words the driver might say → Nominatim cuisine/name tags to search
+_FOOD_KEYWORD_SYNONYMS: dict[str, list[str]] = {
+    "sandwich": ["sandwich", "deli", "sub", "subway", "hoagie", "jersey", "quiznos"],
+    "burger":   ["burger", "hamburger", "fast_food", "mcdonald", "wendy", "in-n-out", "shake shack"],
+    "pizza":    ["pizza", "italian"],
+    "sushi":    ["sushi", "japanese", "ramen", "izakaya"],
+    "salad":    ["salad", "vegan", "vegetarian", "healthy", "bowl"],
+    "coffee":   ["coffee", "cafe", "espresso", "starbucks", "peet"],
+    "taco":     ["mexican", "taco", "burrito", "chipotle"],
+    "chinese":  ["chinese", "dim_sum", "noodle", "dumpling"],
+    "indian":   ["indian", "curry"],
+    "thai":     ["thai"],
+    "korean":   ["korean", "bbq"],
+    "greek":    ["greek", "mediterranean"],
+    "breakfast": ["breakfast", "brunch", "pancake", "waffle", "diner"],
+}
+
+
 async def _handle_meal_preference(
     websocket: WebSocket,
     pending_meal_pois: list,
@@ -455,6 +650,7 @@ async def _handle_meal_preference(
 ):
     lower = transcript.lower()
     matched = None
+    keyword_tried: Optional[str] = None
 
     # Match restaurant name words first (handles "let's go to Erewhon")
     for poi in pending_meal_pois:
@@ -470,12 +666,39 @@ async def _handle_meal_preference(
                 matched = poi
                 break
 
+    # Food-type keyword matching: "sandwich", "burger", "pizza", etc.
     if not matched:
-        matched = pending_meal_pois[0]  # default to nearest
+        for food_word, synonyms in _FOOD_KEYWORD_SYNONYMS.items():
+            if food_word in lower:
+                keyword_tried = food_word
+                for poi in pending_meal_pois:
+                    n = poi.name.lower()
+                    c = (poi.cuisine or "").lower()
+                    if any(s in n or s in c for s in synonyms):
+                        matched = poi
+                        break
+                if matched:
+                    break
+
+    # Determine fallback message before clearing
+    tts_msg: str
+    if not matched and keyword_tried:
+        # Keyword specified but no matching place — honest fallback to nearest
+        matched = pending_meal_pois[0]
+        tts_msg = (
+            f"I don't see any {keyword_tried} places nearby. "
+            f"The closest option is {matched.name} — navigating there instead."
+        )
+    elif not matched:
+        matched = pending_meal_pois[0]
+        tts_msg = f"Great, heading to {matched.name}."
+    elif keyword_tried:
+        tts_msg = f"Found it — heading to {matched.name}."
+    else:
+        tts_msg = f"Great, heading to {matched.name}."
 
     pending_meal_pois.clear()
-
-    asyncio.create_task(tts.speak(f"Great, heading to {matched.name}."))
+    asyncio.create_task(tts.speak(tts_msg))
 
     # Build the Suggestion directly — no LLM or Overpass re-query needed
     suggestion = Suggestion(
@@ -613,6 +836,14 @@ async def _handle_orchestrated(
     from agent.intent_engine import describe as _describe_intents  # noqa: PLC0415
     if intents:
         log.info("Intents decomposed: %s ← %r", _describe_intents(intents), transcript[:40])
+
+    # Meal intent: bypass LLM — go straight to two-turn cuisine flow
+    meal_intent = next((i for i in intents if i.type == "meal"), None)
+    if meal_intent:
+        log.info("Orchestrator: meal fast-path for %r", transcript[:40])
+        asyncio.create_task(_handle_hungry(websocket, agent, pending_meal_pois, sim.state))
+        return
+
     nav_intent = next((i for i in intents if i.type == "navigate"), None)
     if nav_intent and nav_intent.modifiers.get("scenic"):
         scenic_plan = {
@@ -725,9 +956,14 @@ async def _execute_plan(
     log.info("Execute plan: reply=%r actions=%s",
              reply[:50] if reply else "", [a.get("type") for a in actions])
 
+    # Estimate how long TTS will take so music waits for speech to finish.
+    # 185 wpm → ~3 words/sec; add 400 ms buffer so music doesn't interrupt last word.
+    tts_delay_ms = 0
     if reply:
         convo.add_assistant(reply, actions=actions)
         asyncio.create_task(tts.speak(reply))
+        words = len(reply.split())
+        tts_delay_ms = max(1500, int(words / 3.0 * 1000) + 400)
 
     for action in actions:
         atype = action.get("type")
@@ -748,7 +984,8 @@ async def _execute_plan(
             try:
                 await websocket.send_text(json.dumps({
                     "type": "music_results",
-                    "data": {"query": mood, "tracks": tracks},
+                    "data": {"query": mood, "tracks": tracks,
+                             "auto_play": True, "delay_ms": tts_delay_ms},
                 }))
             except Exception:
                 log.exception("Music send failed")
@@ -775,6 +1012,12 @@ async def _execute_plan(
 
         elif atype == "ac":
             sim.state.ac_on = bool(action.get("on", True))
+
+    # After any voice-triggered plan, suppress the proactive agent for 5 min
+    # so a concurrent tick doesn't immediately override the voice response.
+    has_reduce_alerts = any(a.get("type") == "reduce_alerts" for a in actions)
+    if not has_reduce_alerts:
+        agent.suppress(5)
 
     await sim.broadcast()
 

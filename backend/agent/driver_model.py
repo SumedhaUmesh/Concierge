@@ -25,7 +25,7 @@ def compute(signal) -> DriverState:
     # Time-of-day drowsiness — peak 2–5 am, secondary 14–16 pm
     try:
         h = int(str(getattr(signal, "current_time", "12:00")).split(":")[0])
-        tod = 0.75 if 2 <= h <= 5 else (0.25 if 14 <= h <= 16 else 0.0)
+        tod = 0.75 if 2 <= h <= 5 else (0.25 if 14 <= h < 17 else 0.0)
     except (ValueError, AttributeError):
         tod = 0.0
 

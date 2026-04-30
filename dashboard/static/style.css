@@ -318,6 +318,21 @@ html, body {
   box-shadow: 0 0 8px rgba(109,240,200,0.8);
 }
 
+/* ── Map labels (Leaflet tooltips) ────────────────────────────────────────── */
+
+.map-label {
+  background: rgba(0,0,0,0.75);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: #e2e8f0;
+  font-family: var(--font);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.map-label::before { display: none; }
+
 /* ── Agent / suggestion panel ─────────────────────────────────────────────── */
 
 #agent-section {
@@ -482,6 +497,19 @@ html, body {
   line-height: 1.4;
 }
 
+.quiet-mode-badge {
+  background: #4c1d95;
+  border: 1px solid #7c3aed;
+  color: #ddd6fe;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
 /* ── Music ────────────────────────────────────────────────────────────────── */
 
 .music-input-row {
@@ -534,7 +562,7 @@ html, body {
   transition: border-color 0.15s, background 0.15s;
 }
 .music-track:hover { background: #1c1c1c; border-color: #444; }
-.music-track.playing { border-color: var(--accent); background: #0d1a0d; }
+.music-track.playing { border-color: var(--green); background: #0a1a0a; }
 .music-track.music-direct { border-color: #555; }
 
 .music-track-play {
@@ -544,7 +572,7 @@ html, body {
   text-align: center;
   flex-shrink: 0;
 }
-.music-track.playing .music-track-play { color: var(--accent); }
+.music-track.playing .music-track-play { color: var(--green); }
 
 .music-track-title {
   font-size: 12px;
@@ -562,23 +590,38 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: #0d1a0d;
-  border: 1px solid var(--accent);
-  border-radius: 5px;
-  padding: 6px 10px;
-  margin-bottom: 8px;
+  background: #0a1a0a;
+  border: 1px solid var(--green);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
   font-size: 11px;
-  color: var(--accent);
+  color: var(--green);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
-#now-playing-title { flex: 1; }
+#now-playing-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #d4d4d4;
+  font-size: 11px;
+}
 .stop-btn {
   background: none;
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  border-radius: 3px;
-  padding: 1px 6px;
+  border: 1px solid var(--green);
+  color: var(--green);
+  border-radius: 4px;
+  padding: 3px 8px;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.stop-btn:hover {
+  background: rgba(74, 222, 128, 0.12);
 }
 
 /* ── Leaflet overrides ────────────────────────────────────────────────────── */

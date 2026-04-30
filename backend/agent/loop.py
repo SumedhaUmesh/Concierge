@@ -94,11 +94,19 @@ class AgentLoop:
         self._running_task = asyncio.create_task(self._run_inference())
 
     def reset_cooldown(self) -> None:
-        """Called when a new scenario is loaded — clears cooldown so suggestion can fire immediately."""
+        """Full reset for new scenario — clears all accumulated state so the next gate fires fresh."""
+        self._window.clear()
+        self._last_gate_at = 0.0
         self._last_suggestion_at = 0.0
         self._last_suggestion_type = None
         self._dismissed = False
-        log.info("AgentLoop: cooldown reset for new scenario")
+        self._dismissed_at = 0.0
+        self._last_geofence_name = None
+        self._last_geofence_at = 0.0
+        if self._running_task and not self._running_task.done():
+            self._running_task.cancel()
+        self._running_task = None
+        log.info("AgentLoop: full reset for new scenario")
 
     def dismiss(self) -> None:
         """Called when the driver dismisses a suggestion."""

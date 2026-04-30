@@ -85,6 +85,9 @@ class Simulator:
     async def reset(self):
         if self._task and not self._task.done():
             self._task.cancel()
+        self._task = None
+        self._scenario_time_frozen = False
+        self._last_broadcast = time.monotonic()
         self.state = Signal()
         await self.broadcast()
 
