@@ -8,7 +8,7 @@ saying — the hard problem is silence, not speech.
 ### Demo video
 
 
-[![CONCIERGE demo — click to play on YouTube](https://img.youtube.com/vi/mJqeR_JMt8g/hqdefault.jpg)](https://youtu.be/mJqeR_JMt8g)
+[![CONCIERGE demo — click to play on YouTube](https://youtu.be/n6l0w4NIRUo/hqdefault.jpg)](https://youtu.be/mJqeR_JMt8g)
 
 **Direct link:** [https://youtu.be/n6l0w4NIRUo](https://youtu.be/n6l0w4NIRUo)
 ## Quick start
