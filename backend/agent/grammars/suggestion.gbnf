@@ -1,6 +1,6 @@
 root ::= "{" sp "\"type\":" sp type-val sp "," sp "\"urgency\":" sp urgency-val sp "," sp "\"headline\":" sp string-val sp "," sp "\"detail\":" sp string-val sp "," sp "\"suggested_action\":" sp action-val sp "}"
 
-type-val    ::= "\"range\"" | "\"meal\"" | "\"cabin\"" | "\"schedule\"" | "\"music\""
+type-val    ::= "\"range\"" | "\"meal\"" | "\"cabin\"" | "\"rest\"" | "\"schedule\"" | "\"music\""
 urgency-val ::= "1" | "2" | "3" | "4" | "5"
 action-val  ::= "\"find_poi:fuel\"" | "\"find_poi:food\"" | "\"find_poi:rest\"" | "\"check_weather\"" | "\"none\""
 

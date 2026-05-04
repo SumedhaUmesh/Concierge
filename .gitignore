@@ -22,3 +22,6 @@ models/*.bin
 
 # Runtime data
 backend/trip_memory.db
+
+# Secrets
+.env

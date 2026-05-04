@@ -9,6 +9,7 @@ well-suited for a concierge. Falls back gracefully on older macOS.
 import asyncio
 import logging
 import subprocess
+import time as _time
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +24,19 @@ _muted = False
 _voice: str = "Samantha"   # resolved at startup by init()
 _queue: asyncio.Queue = asyncio.Queue()
 _worker_started = False
+_last_text: str = ""
+_last_at: float = 0.0
+
+# Optional callbacks registered by server.py to broadcast tts_start / tts_end
+_on_speak_start = None   # async callable(text: str)
+_on_speak_end   = None   # async callable()
+
+
+def register_speak_events(on_start, on_end) -> None:
+    """Register async callbacks fired before/after each spoken utterance."""
+    global _on_speak_start, _on_speak_end
+    _on_speak_start = on_start
+    _on_speak_end   = on_end
 
 
 def _resolve_voice() -> str:
@@ -56,6 +70,11 @@ async def _tts_worker():
     while True:
         text = await _queue.get()
         try:
+            if _on_speak_start:
+                try:
+                    await _on_speak_start(text)
+                except Exception:
+                    pass
             await asyncio.to_thread(
                 subprocess.run,
                 ["say", "-v", _voice, "-r", str(_RATE), text],
@@ -65,6 +84,11 @@ async def _tts_worker():
         except Exception:
             log.exception("TTS worker failed for text: %r", text[:40])
         finally:
+            if _on_speak_end:
+                try:
+                    await _on_speak_end()
+                except Exception:
+                    pass
             _queue.task_done()
 
 
@@ -79,9 +103,24 @@ def is_muted() -> bool:
 
 
 async def speak(text: str) -> None:
+    global _last_text, _last_at
     if _muted or not text:
         return
-    await _queue.put(text[:160])
+    now = _time.monotonic()
+    if text[:80] == _last_text[:80] and (now - _last_at) < 5.0:
+        log.debug("TTS dedup: skipping duplicate %r", text[:40])
+        return
+    _last_text = text
+    _last_at = now
+    # Truncate at a sentence boundary so TTS never cuts off mid-word
+    chunk = text[:160]
+    if len(text) > 160:
+        for sep in (". ", "! ", "? "):
+            pos = chunk.rfind(sep)
+            if pos > 40:
+                chunk = chunk[:pos + 1]
+                break
+    await _queue.put(chunk)
 
 
 async def speak_stream(token_gen) -> str:

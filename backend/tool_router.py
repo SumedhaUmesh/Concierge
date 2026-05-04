@@ -26,14 +26,21 @@ _TYPE_ACTION_OVERRIDE = {
     "music":    "none",
 }
 
+# These types have unambiguous semantics — always use the type override,
+# never trust whatever suggested_action the LLM hallucinated.
+_TYPE_ALWAYS_WINS = {"cabin", "range", "rest", "meal"}
+
 
 async def enrich(suggestion: Suggestion, state: Signal) -> Suggestion:
     """
     Fill in suggestion.enriched_action based on suggestion.suggested_action.
     Returns the same suggestion object (mutated in place) for convenience.
     """
-    # Small LLM sometimes picks the wrong suggested_action — override by type.
-    action = _TYPE_ACTION_OVERRIDE.get(suggestion.type, suggestion.suggested_action)
+    if suggestion.type in _TYPE_ALWAYS_WINS:
+        # Ignore LLM-generated suggested_action for these types — it's often wrong.
+        action = _TYPE_ACTION_OVERRIDE[suggestion.type]
+    else:
+        action = _TYPE_ACTION_OVERRIDE.get(suggestion.type, suggestion.suggested_action)
 
     if action.startswith("find_poi:"):
         category = action.split(":", 1)[1]

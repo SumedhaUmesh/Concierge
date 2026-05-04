@@ -1,9 +1,17 @@
 import asyncio
 import json
 import logging
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
+
+# Load .env from project root before any agent modules read env vars
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -15,10 +23,9 @@ from agent.loop import AgentLoop
 from obd_source import obd_source
 from tool_router import enrich
 from agent import music as music_mod
-from agent.voice import tts, asr, classifier
+from agent.voice import tts, asr, intent_classifier
 from agent import llm as llm_mod, cloud as cloud_mod
 from agent.prompts import VEHICLE_QA_SYSTEM, VEHICLE_QA_USER
-from agent.intent_engine import decompose as decompose_intents
 from agent.orchestrator import orchestrate, fallback_clarify
 from agent.conversation import ConversationBuffer
 import trip_memory
@@ -43,6 +50,10 @@ async def root():
 @app.post("/sim/state")
 async def sim_set_state(body: dict):
     """Set any simulator state field(s) and broadcast to all clients."""
+    # Freeze the clock if the caller is explicitly setting current_time,
+    # otherwise broadcast() would immediately overwrite it with real time.
+    if "current_time" in body:
+        sim._scenario_time_frozen = True
     for key, value in body.items():
         if hasattr(sim.state, key):
             setattr(sim.state, key, value)
@@ -173,8 +184,8 @@ async def privacy_report():
             "Nominatim reverse geocoding (your GPS coords, no account required)",
             "Open-Meteo weather (your GPS coords, no account required)",
             "OSRM routing (start+end coords, no account required)",
-            "Overpass API POI search (bounding box, no account required)",
-            "Claude Haiku (only if local LLM answer is too short, requires ANTHROPIC_API_KEY)",
+            "Nominatim POI search (bounding box, no account required)",
+            "Claude via OpenRouter (only if local LLM answer is too short, requires OPENROUTER_API_KEY)",
         ],
         "on_device": [
             "LFM2.5-1.2B GGUF — all suggestion generation runs locally",
@@ -207,11 +218,19 @@ async def _warmup():
     from agent.llm import get_llm  # noqa: PLC0415
     await asyncio.to_thread(get_llm)
     tts.init()
+
+    async def _tts_start_cb(_text: str):
+        await _broadcast_ws_all(json.dumps({"type": "tts_start"}))
+
+    async def _tts_end_cb():
+        await _broadcast_ws_all(json.dumps({"type": "tts_end"}))
+
+    tts.register_speak_events(_tts_start_cb, _tts_end_cb)
+
     asyncio.create_task(_broadcast_loop())
     asyncio.create_task(_calendar_sync_loop())
     asyncio.create_task(_weather_loop())
     asyncio.create_task(_music_evolution_loop())
-    asyncio.create_task(_meeting_watch_loop())
 
 
 async def _broadcast_loop():
@@ -224,7 +243,10 @@ async def _broadcast_loop():
 async def _calendar_sync_loop():
     """Sync macOS Calendar every 5 minutes in the background."""
     while True:
-        await _do_calendar_sync()
+        try:
+            await _do_calendar_sync()
+        except Exception:
+            log.exception("Calendar sync loop error — will retry in 5 min")
         await asyncio.sleep(300)
 
 
@@ -300,6 +322,10 @@ async def _music_evolution_loop():
         if not sim._clients:
             continue
 
+        import time as _time_mod  # noqa: PLC0415
+        if _time_mod.monotonic() < _music_suppressed_until:
+            continue  # schedule alert recently fired — don't push music
+
         fatigue = sim.state.fatigue_index
         if fatigue < 0.3:
             target_energy, mood, msg = 3, "calm relaxed", "Keeping things calm and easy."
@@ -328,77 +354,10 @@ async def _music_evolution_loop():
         asyncio.create_task(tts.speak(msg))
 
 
-# ── Continuous Adaptation: Conference Call Mode ───────────────────────────────
-
-_call_mode_active: bool = False
-
-
-async def _meeting_watch_loop():
-    """Enter quiet mode 5 min before next calendar meeting, restore after."""
-    global _call_mode_active
-    await asyncio.sleep(30)  # initial delay
-    while True:
-        await asyncio.sleep(30)
-        try:
-            meeting_time = sim.state.next_meeting_time
-            if not meeting_time:
-                if _call_mode_active:
-                    await _exit_call_mode()
-                continue
-
-            def _hhmm_to_min(t: str) -> int:
-                h, m = t.split(":", 1)
-                return int(h) * 60 + int(m)
-
-            now_min = _hhmm_to_min(sim.state.current_time)
-            mtg_min = _hhmm_to_min(meeting_time)
-            minutes_until = mtg_min - now_min
-
-            if 0 < minutes_until <= 5 and not _call_mode_active:
-                await _enter_call_mode(round(minutes_until))
-            elif _call_mode_active and (minutes_until <= 0 or minutes_until > 5):
-                await _exit_call_mode()
-        except Exception:
-            log.exception("Meeting watch loop error")
-
-
-async def _enter_call_mode(minutes_until: int) -> None:
-    global _call_mode_active
-    _call_mode_active = True
-    log.info("Conference call mode: entering (meeting in %d min)", minutes_until)
-
-    # Enqueue speech *before* muting so it still plays
-    await tts.speak(
-        f"Entering quiet mode — you have a meeting in {minutes_until} minute{'s' if minutes_until != 1 else ''}."
-    )
-    tts.set_muted(True)
-
-    # Suppress proactive alerts during the call window
-    for agent in sim._agents:
-        agent.suppress(60)
-
-    # Close windows and turn on AC for a quiet cabin
-    sim.state.windows_open = False
-    sim.state.sunroof_open = False
-    sim.state.ac_on        = True
-    await sim.broadcast()
-
-    await _broadcast_ws_all({
-        "type": "mode_change",
-        "data": {"mode": "quiet", "reason": f"Meeting in {minutes_until} min"},
-    })
-
-
-async def _exit_call_mode() -> None:
-    global _call_mode_active
-    _call_mode_active = False
-    log.info("Conference call mode: exiting")
-    tts.set_muted(False)
-    asyncio.create_task(tts.speak("Quiet mode ended. Welcome back."))
-    await _broadcast_ws_all({
-        "type": "mode_change",
-        "data": {"mode": "normal"},
-    })
+# Timestamp after which the music evolution loop may fire again.
+# Set to future when a schedule/lateness alert fires so music doesn't
+# auto-play immediately after a "you'll be late" warning.
+_music_suppressed_until: float = 0.0
 
 
 @app.websocket("/ws")
@@ -417,21 +376,32 @@ async def ws_endpoint(websocket: WebSocket):
     # Per-session conversation buffer (conversational continuity)
     convo = ConversationBuffer()
 
-    async def _on_suggestion(suggestion: Suggestion):
+    async def _on_suggestion(suggestion: Suggestion, speak: bool = True):
+        # Proactive meal: ask for preference first rather than pinning a specific restaurant.
+        # This matches the voice-triggered hungry flow and feels more conversational.
+        if suggestion.type == "meal" and not suggestion.enriched_action:
+            asyncio.create_task(_handle_hungry(websocket, agent, pending_meal_pois, sim.state))
+            return
+
         # Rest stop: fill from state coords and skip enrich entirely — Nominatim
         # rarely has "rest_area" tags in urban areas, so bypass it completely.
-        if (suggestion.type == "rest"
+        # Match by type OR suggested_action because the small LLM may output
+        # type="cabin" with suggested_action="find_poi:rest" when grammar lacked "rest".
+        _is_rest = (suggestion.type == "rest"
+                    or suggestion.suggested_action == "find_poi:rest")
+        if (_is_rest
                 and sim.state.next_rest_stop_lat
                 and sim.state.next_rest_stop_lng):
             km = round(sim.state.next_rest_stop_km or 0)
             suggestion.enriched_action = {
                 "type": "navigate",
-                "label": f"Open in Google Maps ({km} km)",
+                "label": f"Navigate to rest stop ({km} km)",
+                "place_name": f"Rest Stop • {km} km ahead",
                 "lat": sim.state.next_rest_stop_lat,
                 "lng": sim.state.next_rest_stop_lng,
             }
-            suggestion.headline = f"Rest stop {km} km ahead — take a break"
-            suggestion.detail   = "You've been driving over 2 hours. Pull over and recharge."
+            suggestion.headline = f"Rest stop {km} km ahead"
+            suggestion.detail   = "You've been driving over 2 hours. Pull over, stretch, and recharge."
             log.info("_on_suggestion: rest stop pinned (%.3f, %.3f)",
                      sim.state.next_rest_stop_lat, sim.state.next_rest_stop_lng)
         elif suggestion.enriched_action:
@@ -452,8 +422,27 @@ async def ws_endpoint(websocket: WebSocket):
         except Exception:
             pass
 
-        # Read headline aloud
-        asyncio.create_task(tts.speak(suggestion.headline))
+        # Speak the suggestion — schedule gets context-aware phrasing from state
+        if speak:
+            if suggestion.type == "schedule" and sim.state.next_meeting_title and sim.state.next_meeting_time:
+                global _music_suppressed_until
+                import time as _t  # noqa: PLC0415
+                _music_suppressed_until = _t.monotonic() + 600  # suppress music for 10 min
+                mtg = sim.state.next_meeting_title
+                try:
+                    mins_until = _hhmm_to_min(sim.state.next_meeting_time) - _hhmm_to_min(sim.state.current_time)
+                    travel = (sim.state.normal_travel_minutes or 0) + (sim.state.traffic_delay_minutes or 0)
+                    if mins_until < travel:
+                        tts_msg = (f"You might be late for {mtg} — you need {travel} minutes "
+                                   f"but only have {mins_until}. I'd leave now.")
+                    else:
+                        tts_msg = (f"Time to head out for {mtg}. "
+                                   f"It's {travel} minutes away and you have about {mins_until} minutes.")
+                except Exception:
+                    tts_msg = suggestion.headline
+                asyncio.create_task(tts.speak(tts_msg))
+            else:
+                asyncio.create_task(tts.speak(suggestion.headline))
 
     agent = AgentLoop(on_suggestion=_on_suggestion)
     sim.add_agent(agent)
@@ -515,8 +504,15 @@ async def _handle_voice(
     convo: ConversationBuffer,
     audio_b64: str,
 ):
+    log.info("Voice input received: %d b64-chars", len(audio_b64))
     transcript = await asr.transcribe(audio_b64)
     if not transcript:
+        log.info("Voice: no transcript returned (empty speech or ASR error)")
+        # Reset frontend — otherwise "Transcribing…" spinner hangs indefinitely
+        try:
+            await websocket.send_text(json.dumps({"type": "transcript", "data": {"text": ""}}))
+        except Exception:
+            pass
         return
 
     convo.add_user(transcript)
@@ -529,12 +525,26 @@ async def _handle_voice(
     except Exception:
         pass
 
-    # Mid meal-preference flow takes priority
+    # Mid meal-preference flow: driver is answering the cuisine question — skip classification
     if pending_meal_pois:
         await _handle_meal_preference(websocket, pending_meal_pois, transcript, on_suggestion)
         return
 
-    intent = await classifier.classify(transcript)
+    # LLM-first: single call classifies intent and extracts parameters
+    intent_data = await intent_classifier.classify(transcript)
+    intent = intent_data.get("intent", "other")
+
+    # Normalize: small LLM sometimes returns the field name ("cabin_action") as intent
+    if intent == "cabin_action":
+        intent = "cabin"
+
+    # Noise guard: genuine accept / dismiss / defer are short phrases (≤5 words).
+    # A longer transcript classified as one of these is almost certainly background
+    # audio that Whisper mis-transcribed as conversational speech.
+    if intent in ("accept", "dismiss", "defer") and len(transcript.split()) > 5:
+        log.info("Noise guard: dropped %d-word '%s' transcript classified as %s",
+                 len(transcript.split()), intent, intent)
+        return
 
     if intent == "accept":
         agent.accept()
@@ -554,8 +564,90 @@ async def _handle_voice(
         agent.dismiss()
         asyncio.create_task(tts.speak("Got it. I'll check back in a few minutes."))
 
+    elif intent == "meal":
+        asyncio.create_task(_handle_hungry(
+            websocket, agent, pending_meal_pois, sim.state,
+            on_suggestion=on_suggestion,
+            initial_transcript=transcript,
+        ))
+
+    elif intent == "cabin":
+        cabin_action = intent_data.get("cabin_action")
+        celsius      = intent_data.get("celsius")
+        # If no action extracted (keyword fallback or LLM confusion), infer from transcript
+        if not cabin_action and not celsius:
+            _t = transcript.lower()
+            if "window" in _t:
+                cabin_action = "windows_open" if any(w in _t for w in ("open", "down", "roll", "lower")) else "windows_close"
+            elif "sunroof" in _t:
+                cabin_action = "sunroof_open" if "open" in _t else "sunroof_close"
+            elif any(w in _t for w in ("ac on", "turn on ac", "turn on the ac", "start ac", "start the ac")):
+                cabin_action = "ac_on"
+            elif any(w in _t for w in ("hot", "stuffy", "heat", "sweating", "burning")):
+                cabin_action = "cool"   # driver is too hot → cool down
+            elif any(w in _t for w in ("cold", "chill", "freez", "shiver")):
+                cabin_action = "warm"   # driver is too cold → warm up
+            elif any(w in _t for w in ("warm", "warmer", "heat up")):
+                cabin_action = "warm"   # driver explicitly wants warmth
+            elif any(w in _t for w in (" ac ", "cool", "cooler", "air")):
+                cabin_action = "cool"   # generic AC / cooling request
+            log.info("Cabin: inferred action=%r from transcript", cabin_action)
+        plan = _cabin_intent_to_plan(cabin_action, celsius)
+        if plan:
+            asyncio.create_task(_execute_plan(
+                websocket, agent, pending_meal_pois, on_suggestion, convo, plan, transcript
+            ))
+        else:
+            asyncio.create_task(
+                _handle_orchestrated(websocket, agent, pending_meal_pois, on_suggestion, convo, transcript)
+            )
+
+    elif intent == "compound":
+        t_lower = transcript.lower()
+        # Coffee + meeting time check → dedicated handler (no LLM, deterministic)
+        _coffee_words  = ("coffee", "cafe", "café", "espresso", "latte", "cappuccino")
+        _meeting_words = ("meeting", "time", "late", "make it", "before", "appointment")
+        if any(w in t_lower for w in _coffee_words) and any(w in t_lower for w in _meeting_words):
+            asyncio.create_task(_handle_coffee_schedule(websocket, on_suggestion, sim.state))
+        else:
+            # General compound → Claude if available, else local LLM orchestrator
+            asyncio.create_task(
+                _handle_orchestrated(websocket, agent, pending_meal_pois, on_suggestion, convo,
+                                     transcript, use_cloud=True)
+            )
+
+    elif intent == "music":
+        asyncio.create_task(_handle_music(websocket, transcript))
+
+    elif intent == "query":
+        # "Find me a coffee shop on my route and tell me..." — ASR often truncates the
+        # tail ("if I have time before my meeting"), causing the classifier to miss
+        # the compound nature. Catch it here by keyword before falling to Q&A.
+        t_lower = transcript.lower()
+        _coffee_words  = ("coffee", "cafe", "café", "espresso", "latte", "cappuccino")
+        _route_words   = ("route", "on my way", "on the way", "nearby", "find me")
+        if any(w in t_lower for w in _coffee_words) and any(w in t_lower for w in _route_words):
+            asyncio.create_task(_handle_coffee_schedule(websocket, on_suggestion, sim.state))
+        else:
+            asyncio.create_task(_handle_query(websocket, transcript, sim.state))
+
+    elif intent == "navigate":
+        fast = intent_data.get("fast", False)
+        if fast:
+            fast_plan = {
+                "reply":   "Got it — keeping you on the fastest route.",
+                "actions": [{"type": "reduce_alerts", "minutes": 10}],
+            }
+            asyncio.create_task(_execute_plan(
+                websocket, agent, pending_meal_pois, on_suggestion, convo, fast_plan, transcript
+            ))
+        else:
+            asyncio.create_task(
+                _handle_orchestrated(websocket, agent, pending_meal_pois, on_suggestion, convo, transcript)
+            )
+
     else:
-        # All other inputs — natural language, vague, emotional, compound — go to orchestrator
+        # other, emotional, unrecognized — orchestrator handles these
         asyncio.create_task(
             _handle_orchestrated(websocket, agent, pending_meal_pois, on_suggestion, convo, transcript)
         )
@@ -566,6 +658,9 @@ async def _handle_hungry(
     agent: AgentLoop,
     pending_meal_pois: list,
     state,
+    *,
+    on_suggestion=None,
+    initial_transcript: str = "",
 ):
     from agent.tools.poi import find_poi
     from agent.tools.route import get_route
@@ -587,6 +682,13 @@ async def _handle_hungry(
 
     pending_meal_pois.clear()
     pending_meal_pois.extend(pois[:6])
+
+    # If the driver's original utterance already names a food type (e.g. "I want coffee"),
+    # skip the preference question and go straight to matching.
+    if initial_transcript and on_suggestion and _has_food_preference(initial_transcript):
+        log.info("_handle_hungry: preference already in utterance, skipping question")
+        await _handle_meal_preference(websocket, pending_meal_pois, initial_transcript, on_suggestion)
+        return
 
     # Collect unique cuisines for the preference question
     cuisines = []
@@ -626,20 +728,42 @@ async def _handle_hungry(
 
 # Maps food words the driver might say → Nominatim cuisine/name tags to search
 _FOOD_KEYWORD_SYNONYMS: dict[str, list[str]] = {
-    "sandwich": ["sandwich", "deli", "sub", "subway", "hoagie", "jersey", "quiznos"],
-    "burger":   ["burger", "hamburger", "fast_food", "mcdonald", "wendy", "in-n-out", "shake shack"],
-    "pizza":    ["pizza", "italian"],
-    "sushi":    ["sushi", "japanese", "ramen", "izakaya"],
-    "salad":    ["salad", "vegan", "vegetarian", "healthy", "bowl"],
-    "coffee":   ["coffee", "cafe", "espresso", "starbucks", "peet"],
-    "taco":     ["mexican", "taco", "burrito", "chipotle"],
-    "chinese":  ["chinese", "dim_sum", "noodle", "dumpling"],
-    "indian":   ["indian", "curry"],
-    "thai":     ["thai"],
-    "korean":   ["korean", "bbq"],
-    "greek":    ["greek", "mediterranean"],
-    "breakfast": ["breakfast", "brunch", "pancake", "waffle", "diner"],
+    "sandwich":   ["sandwich", "deli", "sub", "subway", "hoagie", "jersey", "quiznos"],
+    "burger":     ["burger", "hamburger", "fast_food", "mcdonald", "wendy", "in-n-out", "shake shack"],
+    "pizza":      ["pizza", "italian"],
+    "pasta":      ["pasta", "spaghetti", "carbonara", "lasagna", "fettuccine"],
+    "sushi":      ["sushi", "izakaya"],
+    "ramen":      ["ramen", "noodle", "pho", "udon", "tonkotsu"],
+    "japanese":   ["japanese", "teriyaki", "tempura"],
+    "salad":      ["salad", "vegan", "vegetarian", "healthy"],
+    "bowl":       ["bowl", "grain bowl", "rice bowl", "acai"],
+    "coffee":     ["coffee", "cafe", "espresso", "starbucks", "peet", "latte", "cappuccino", "americano"],
+    "smoothie":   ["smoothie", "juice bar", "acai bowl"],
+    "taco":       ["mexican", "taco", "burrito", "chipotle", "quesadilla", "enchilada"],
+    "chinese":    ["chinese", "dim sum", "dim_sum", "dumpling", "wonton", "hot pot"],
+    "indian":     ["indian", "curry", "biryani", "naan", "tikka", "masala"],
+    "thai":       ["thai", "pad thai", "satay"],
+    "korean":     ["korean", "kbbq", "bibimbap", "bulgogi", "korean bbq"],
+    "greek":      ["greek", "mediterranean"],
+    "shawarma":   ["shawarma", "kebab", "gyro", "falafel", "hummus", "middle eastern", "halal"],
+    "bbq":        ["bbq", "barbecue", "ribs", "smoked", "brisket", "pulled pork"],
+    "wings":      ["wings", "buffalo", "chicken wings"],
+    "steak":      ["steak", "steakhouse", "chophouse"],
+    "seafood":    ["seafood", "fish", "lobster", "crab", "shrimp", "oyster", "clam"],
+    "poke":       ["poke", "hawaiian", "ahi"],
+    "vietnamese": ["vietnamese", "banh mi", "spring roll", "bun bo"],
+    "breakfast":  ["breakfast", "brunch", "pancake", "waffle", "diner", "omelette", "eggs"],
 }
+
+
+def _has_food_preference(text: str) -> bool:
+    """True when the utterance already names a specific food type."""
+    lower = text.lower()
+    return any(
+        s in lower
+        for synonyms in _FOOD_KEYWORD_SYNONYMS.values()
+        for s in synonyms
+    )
 
 
 async def _handle_meal_preference(
@@ -652,10 +776,11 @@ async def _handle_meal_preference(
     matched = None
     keyword_tried: Optional[str] = None
 
-    # Match restaurant name words first (handles "let's go to Erewhon")
+    # Match restaurant name words first (handles "let's go to Erewhon").
+    # Skip words shorter than 4 chars to avoid "el", "in", "the" matching as substrings.
     for poi in pending_meal_pois:
         words = [w.strip("'s.,") for w in poi.name.lower().split()]
-        if any(w and w in lower for w in words):
+        if any(w and len(w) >= 4 and w in lower for w in words):
             matched = poi
             break
 
@@ -714,7 +839,176 @@ async def _handle_meal_preference(
             "lng": matched.lng,
         },
     )
-    await on_suggestion(suggestion)
+    await on_suggestion(suggestion, speak=False)  # tts_msg already spoken above
+
+
+# ── Compound handler: coffee stop + meeting time check ───────────────────────
+
+def _hhmm_to_min(t: str) -> int:
+    """Convert "HH:MM" to total minutes since midnight."""
+    try:
+        h, m = str(t).split(":", 1)
+        return int(h) * 60 + int(m)
+    except Exception:
+        return 0
+
+
+async def _handle_coffee_schedule(
+    websocket: WebSocket,
+    on_suggestion,
+    state,
+) -> None:
+    """
+    Compound handler for 'find coffee on my route + do I have time before meeting'.
+
+    Flow:
+      1. Find coffee/cafe POIs filtered to the driver's route
+      2. Get travel time: car → coffee shop (OSRM)
+      3. Get travel time: coffee shop → destination (OSRM, if destination known)
+      4. Calculate detour cost vs time until meeting
+      5. Give a single spoken verdict + suggestion card
+    """
+    from agent.tools.poi import find_poi          # noqa: PLC0415
+    from agent.tools.route import get_route, get_travel_time  # noqa: PLC0415
+
+    # ── Step 1: Find coffee on route ────────────────────────────────────────
+    route = None
+    if state.destination_lat and state.destination_lng:
+        route = await get_route(state.lat, state.lng,
+                                state.destination_lat, state.destination_lng)
+
+    pois = await find_poi("food", state.lat, state.lng, radius_km=15,
+                          route=route, limit=10)
+
+    # Prefer places with coffee/cafe in name or cuisine
+    _COFFEE_WORDS = {"coffee", "cafe", "café", "espresso", "starbucks",
+                     "peet", "blue bottle", "lavazza", "tim horton"}
+    coffee_pois = [
+        p for p in pois
+        if any(w in (p.name + " " + (p.cuisine or "")).lower() for w in _COFFEE_WORDS)
+    ]
+    candidates = coffee_pois if coffee_pois else pois  # fall back to any food nearby
+    if not candidates:
+        asyncio.create_task(tts.speak(
+            "I couldn't find any coffee shops on your route right now."
+        ))
+        return
+
+    best = candidates[0]
+
+    # ── Step 2: Travel times via OSRM ───────────────────────────────────────
+    travel_to_coffee = await get_travel_time(
+        state.lat, state.lng, best.lat, best.lng
+    )
+
+    detour_min: Optional[float] = None
+    if travel_to_coffee is not None and state.destination_lat and state.destination_lng:
+        travel_coffee_to_dest = await get_travel_time(
+            best.lat, best.lng,
+            state.destination_lat, state.destination_lng,
+        )
+        current_travel = await get_travel_time(
+            state.lat, state.lng,
+            state.destination_lat, state.destination_lng,
+        )
+        if travel_coffee_to_dest is not None and current_travel is not None:
+            detour_min = max(0.0, (travel_to_coffee + travel_coffee_to_dest) - current_travel)
+    elif travel_to_coffee is not None:
+        # No destination set — estimate detour as round-trip to coffee
+        detour_min = travel_to_coffee * 1.5
+
+    # ── Step 3: Meeting time check ───────────────────────────────────────────
+    has_time: Optional[bool] = None
+    margin_min: float = 0.0
+    minutes_until_meeting: Optional[float] = None
+
+    if state.next_meeting_time and state.current_time:
+        minutes_until_meeting = (
+            _hhmm_to_min(state.next_meeting_time) - _hhmm_to_min(state.current_time)
+        )
+        travel_needed = (state.normal_travel_minutes or 0) + (state.traffic_delay_minutes or 0)
+        stop_time = 10  # assume 10 min at the coffee shop
+        detour_cost = detour_min if detour_min is not None else (travel_to_coffee or 10) * 1.5
+        time_needed = travel_needed + detour_cost + stop_time
+        margin_min = minutes_until_meeting - time_needed
+        has_time = margin_min >= 0
+
+    # ── Step 4: Compose spoken verdict ──────────────────────────────────────
+    dist_str = (f"{round(detour_min)} min detour" if detour_min is not None
+                else f"{best.distance_km} km away")
+
+    if has_time is True:
+        verdict = (
+            f"You have about {round(margin_min)} minutes to spare — enough for a quick stop."
+        )
+        reply = f"Found {best.name}, {dist_str}. {verdict}"
+    elif has_time is False:
+        verdict = (
+            f"It'd be tight — your meeting is in {round(minutes_until_meeting)} minutes."
+        )
+        reply = f"There's {best.name} {dist_str}, but {verdict} I'd skip it today."
+    else:
+        # No meeting in state
+        reply = f"{best.name} is {dist_str}. Want me to navigate there?"
+        verdict = f"{best.cuisine.title() or 'Coffee'} · {best.distance_km} km"
+
+    asyncio.create_task(tts.speak(reply))
+    log.info("Coffee+schedule: %s, detour=%.1f min, has_time=%s",
+             best.name, detour_min or 0, has_time)
+
+    # ── Step 5: Suggestion card ──────────────────────────────────────────────
+    headline = f"☕ {best.name}"
+    if has_time is True:
+        headline += f" — {round(margin_min)} min to spare"
+    elif has_time is False:
+        headline += " — tight on time"
+
+    suggestion = Suggestion(
+        type="meal",
+        urgency=3,
+        headline=headline,
+        detail=verdict,
+        suggested_action="find_poi:food",
+        enriched_action={
+            "type": "navigate",
+            "label": f"Navigate to {best.name}",
+            "place_name": best.name,
+            "distance_km": best.distance_km,
+            "lat": best.lat,
+            "lng": best.lng,
+            "address": best.address,
+        },
+    )
+    await on_suggestion(suggestion, speak=False)  # reply already spoken above
+
+
+
+# ── Cabin intent → plan (no LLM needed) ─────────────────────────────────────
+
+_CABIN_PLAN_MAP: dict[str, tuple[str, list]] = {
+    "cool":          ("I'll cool the cabin down for you.",  [{"type": "cabin_temp", "celsius": 18}, {"type": "ac", "on": True}]),
+    "warm":          ("I'll warm things up.",               [{"type": "cabin_temp", "celsius": 24}]),
+    "ac_on":         ("AC is on.",                          [{"type": "ac", "on": True}]),
+    "windows_open":  ("Opening the windows.",               [{"type": "windows", "open": True}]),
+    "windows_close": ("Closing the windows.",               [{"type": "windows", "open": False}]),
+    "sunroof_open":  ("Opening the sunroof.",               [{"type": "sunroof", "open": True}]),
+    "sunroof_close": ("Closing the sunroof.",               [{"type": "sunroof", "open": False}]),
+}
+
+
+def _cabin_intent_to_plan(cabin_action: Optional[str], celsius: Optional[float]) -> Optional[dict]:
+    if celsius is not None:
+        return {
+            "reply":   f"Setting the cabin to {celsius}°C.",
+            "actions": [{"type": "cabin_temp", "celsius": celsius}],
+        }
+    if not cabin_action:
+        return None
+    entry = _CABIN_PLAN_MAP.get(cabin_action)
+    if not entry:
+        return None
+    reply, actions = entry
+    return {"reply": reply, "actions": list(actions)}
 
 
 # ── Emotional fast-path — no LLM needed ──────────────────────────────────────
@@ -814,16 +1108,17 @@ async def _handle_orchestrated(
     on_suggestion,
     convo: ConversationBuffer,
     transcript: str,
+    use_cloud: bool = False,
 ) -> None:
     """
-    Natural language orchestration: routes any non-control utterance through
-    the LLM orchestrator which understands vague/emotional/indirect language
-    and returns a coordinated multi-action plan.
+    Orchestrate cabin, compound, emotional, and other open-ended utterances.
+    Reaches here only after LLM intent classification in _handle_voice().
+    use_cloud=True tries Claude Haiku first (compound queries); falls back to local LLM.
     """
     import json as _json
     from dataclasses import asdict as _asdict
 
-    # Fast path: emotional states are handled instantly without any LLM call
+    # Emotional fast-path: instant response for clear emotional states, no LLM needed
     fast_plan = _emotional_fast_path(transcript)
     if fast_plan:
         log.info("Orchestrator: emotional fast-path for %r", transcript[:40])
@@ -831,54 +1126,22 @@ async def _handle_orchestrated(
                             fast_plan, transcript)
         return
 
-    # Intent Decomposition Engine — handle compound/scenic requests without LLM
-    intents = decompose_intents(transcript)
-    from agent.intent_engine import describe as _describe_intents  # noqa: PLC0415
-    if intents:
-        log.info("Intents decomposed: %s ← %r", _describe_intents(intents), transcript[:40])
+    resolved   = convo.resolve(transcript)
+    state_json = _json.dumps(_asdict(sim.state), default=str)[:600]
+    conv_ctx   = convo.context_str()
+    pref_ctx   = trip_memory.get_context_string() or ""
 
-    # Meal intent: bypass LLM — go straight to two-turn cuisine flow
-    meal_intent = next((i for i in intents if i.type == "meal"), None)
-    if meal_intent:
-        log.info("Orchestrator: meal fast-path for %r", transcript[:40])
-        asyncio.create_task(_handle_hungry(websocket, agent, pending_meal_pois, sim.state))
-        return
-
-    nav_intent = next((i for i in intents if i.type == "navigate"), None)
-    if nav_intent and nav_intent.modifiers.get("scenic"):
-        scenic_plan = {
-            "reply": "I'll find you a scenic route. It may take a bit longer, but the views will be worth it.",
-            "actions": [
-                {"type": "music", "mood": "warm calm", "energy": 3},
-                {"type": "reduce_alerts", "minutes": 20},
-            ],
-        }
-        log.info("Orchestrator: scenic route fast-path")
-        await _execute_plan(websocket, agent, pending_meal_pois, on_suggestion, convo,
-                            scenic_plan, transcript)
-        asyncio.create_task(tts.speak(scenic_plan["reply"]))
-        return
-    elif nav_intent and nav_intent.modifiers.get("fast"):
-        fast_nav_plan = {
-            "reply": "Got it — I'll keep you on the fastest route.",
-            "actions": [{"type": "reduce_alerts", "minutes": 10}],
-        }
-        await _execute_plan(websocket, agent, pending_meal_pois, on_suggestion, convo,
-                            fast_nav_plan, transcript)
-        return
-
-    # Resolve references ("make it closer") using conversation history
-    resolved = convo.resolve(transcript)
-
-    # Build context
-    state_json  = _json.dumps(_asdict(sim.state), default=str)[:600]
-    conv_ctx    = convo.context_str()
-    pref_ctx    = trip_memory.get_context_string() or ""
-
-    plan = await orchestrate(resolved, state_json, conv_ctx, pref_ctx)
+    # For compound queries, try Claude Haiku first — much better at multi-step reasoning
+    plan = None
+    if use_cloud:
+        plan = await cloud_mod.orchestrate_compound(resolved, state_json, conv_ctx)
+        if plan:
+            log.info("Orchestrator: using Claude for compound query")
 
     if plan is None:
-        # Graceful failure — smart clarifying question, not "I don't understand"
+        plan = await orchestrate(resolved, state_json, conv_ctx, pref_ctx)
+
+    if plan is None:
         question = fallback_clarify(transcript)
         convo.add_assistant(question)
         asyncio.create_task(tts.speak(question))
@@ -887,7 +1150,6 @@ async def _handle_orchestrated(
     confidence = plan.get("confidence", "high")
     clarify    = plan.get("clarify")
 
-    # If low confidence, ask smart question instead of guessing wrong
     if confidence == "low" and clarify:
         convo.add_assistant(clarify)
         asyncio.create_task(tts.speak(clarify))
@@ -918,7 +1180,10 @@ def _normalize_action(action: dict) -> dict:
         celsius = action.get("celsius") or action.get("value") or action.get("temperature") or 21
         return {"type": "cabin_temp", "celsius": float(celsius)}
 
-    if any(w in raw for w in ("window", "sunroof")):
+    if "sunroof" in raw:
+        return {"type": "sunroof", "open": bool(action.get("open", False))}
+
+    if "window" in raw:
         return {"type": "windows", "open": bool(action.get("open", False))}
 
     if any(w in raw for w in ("ac ", "air condition", "air-condition", "hvac")):
@@ -965,9 +1230,18 @@ async def _execute_plan(
         words = len(reply.split())
         tts_delay_ms = max(1500, int(words / 3.0 * 1000) + 400)
 
+    # When the primary intent is a food search, skip ambient actions the orchestrator
+    # may have added (music, cabin, windows) — the driver just wants food, not a mood reset.
+    _food_only = any(
+        a.get("type") == "find_poi" and a.get("category") == "food" for a in actions
+    )
+
     for action in actions:
         atype = action.get("type")
         if not atype:
+            continue
+        if _food_only and atype in ("music", "cabin_temp", "ac", "windows", "navigate"):
+            log.info("Action: skipping %s (food-only request)", atype)
             continue
         log.info("Action: %s %s", atype, {k: v for k, v in action.items() if k != "type"})
 
@@ -993,7 +1267,11 @@ async def _execute_plan(
         elif atype == "find_poi":
             category = action.get("category", "food")
             asyncio.create_task(
-                _handle_hungry(websocket, agent, pending_meal_pois, sim.state)
+                # Pass original transcript so _handle_hungry skips the preference question
+                # when the driver already named a specific food ("find me a burger").
+                _handle_hungry(websocket, agent, pending_meal_pois, sim.state,
+                               on_suggestion=on_suggestion,
+                               initial_transcript=original_transcript)
                 if category == "food"
                 else _find_and_suggest(websocket, on_suggestion, category, sim.state)
             )
@@ -1001,13 +1279,14 @@ async def _execute_plan(
         elif atype == "navigate":
             destination = action.get("destination", "")
             log.info("Orchestrator: navigate to %r", destination)
-            asyncio.create_task(tts.speak(f"Setting navigation to {destination}."))
 
         elif atype == "reduce_alerts":
             agent.suppress(float(action.get("minutes", 15)))
 
         elif atype == "windows":
             sim.state.windows_open = bool(action.get("open", False))
+
+        elif atype == "sunroof":
             sim.state.sunroof_open = bool(action.get("open", False))
 
         elif atype == "ac":
@@ -1024,7 +1303,7 @@ async def _execute_plan(
 
 async def _find_and_suggest(websocket: WebSocket, on_suggestion, category: str, state) -> None:
     """Find a non-food POI and push it as a suggestion (rest stop, gas, etc.)."""
-    poi_map = {"rest": "rest", "gas": "fuel", "coffee": "food", "scenic": "rest"}
+    poi_map = {"rest": "rest", "gas": "fuel", "coffee": "food"}
     trigger_map = {
         "rest":   "driver requested a rest stop — suggest one nearby (type=rest)",
         "fuel":   "driver asked about fuel — suggest the nearest station (type=range)",
@@ -1032,49 +1311,17 @@ async def _find_and_suggest(websocket: WebSocket, on_suggestion, category: str, 
     }
     poi_type = poi_map.get(category, "rest")
     trigger  = trigger_map.get(poi_type, f"driver requested {category} stop (type=rest)")
-    from agent.loop import AgentLoop  # noqa: PLC0415
-    # Force-generate a suggestion for this trigger
     from agent.generator import generate_suggestion  # noqa: PLC0415
-    from agent.loop import AgentLoop as _AL  # noqa: PLC0415
     suggestion = await generate_suggestion([state], trigger=trigger)
     if suggestion:
         await on_suggestion(suggestion)
-
-
-async def _handle_compound_intents(
-    websocket: WebSocket,
-    agent: AgentLoop,
-    pending_meal_pois: list,
-    sub_intents,
-    raw: str,
-) -> None:
-    """
-    Intent Decomposition Engine — execute multiple intents from one utterance in priority order.
-    Example: "I'm hungry and need gas" fires fuel check first, then meal search.
-    """
-    acknowledged = [i.type for i in sub_intents]
-    ack_text = " and ".join(acknowledged[:2])
-    asyncio.create_task(tts.speak(f"Got it — I'll handle {ack_text} for you."))
-
-    for intent in sub_intents:
-        if intent.type == "fuel":
-            agent.force_suggest("fuel critically low — suggest stopping for fuel (type=range)")
-        elif intent.type in ("meal", "hungry"):
-            asyncio.create_task(_handle_hungry(websocket, agent, pending_meal_pois, sim.state))
-        elif intent.type == "rest":
-            agent.force_suggest("driver requested a rest stop (type=rest)")
-        elif intent.type == "music":
-            await _handle_music(websocket, raw)
-        elif intent.type == "query":
-            asyncio.create_task(_handle_query(websocket, raw, sim.state))
-        await asyncio.sleep(0.3)   # slight stagger so TTS doesn't overlap
 
 
 async def _handle_query(websocket: WebSocket, question: str, state) -> None:
     """
     Answer a driver's spoken question.
     Tries local LFM first; escalates to Claude Haiku if the answer is too
-    short or hedging — mirrors MB × Liquid AI 'complements cloud LLMs'.
+    short or hedging'.
     """
     from dataclasses import asdict
     compact = {k: v for k, v in asdict(state).items()
@@ -1126,7 +1373,9 @@ async def _handle_music(websocket: WebSocket, query: str):
     try:
         await websocket.send_text(json.dumps({
             "type": "music_results",
-            "data": {"query": query, "tracks": tracks},
+            # auto_play starts the top-ranked track after a short delay
+            # (300 ms lets any TTS finish before music begins)
+            "data": {"query": query, "tracks": tracks, "auto_play": True, "delay_ms": 300},
         }))
     except Exception:
         pass

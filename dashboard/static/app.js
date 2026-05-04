@@ -32,6 +32,7 @@ function setGauge(fillId, pct) {
 /* ── Map ──────────────────────────────────────────────────────────────────── */
 
 let map, carMarker, stationMarker, restStopMarker, destMarker, enrichedMarker;
+let _enrichedFuelShown = false;  // true while enriched fuel POI is on map; suppresses stationMarker
 let routePolyline = null;
 let _lastRouteDest = null;
 
@@ -122,6 +123,7 @@ function onSignal(s) {
   document.getElementById('time-val').textContent     = s.current_time;
   document.getElementById('location-val').textContent = s.location_label;
   document.getElementById('range-val').textContent    = Math.round(s.range_km);
+  document.getElementById('rpm-val').textContent      = (s.rpm || 0).toLocaleString();
   document.getElementById('temp-val').textContent     = Math.round(s.cabin_temp_c);
   document.getElementById('outside-val').textContent  = Math.round(s.outside_temp_c);
 
@@ -186,7 +188,7 @@ function onSignal(s) {
       map.panTo([s.lat, s.lng], { animate: true, duration: 0.6 });
     }
 
-    setMarker(stationMarker, s.next_gas_station_lat, s.next_gas_station_lng, s.fuel_percent < 30);
+    setMarker(stationMarker, s.next_gas_station_lat, s.next_gas_station_lng, s.fuel_percent < 30 && !_enrichedFuelShown);
     setMarker(restStopMarker, s.next_rest_stop_lat, s.next_rest_stop_lng,
               s.next_rest_stop_km != null);
     setMarker(destMarker, s.destination_lat, s.destination_lng,
@@ -221,6 +223,39 @@ function setDriverBar(id, value) {
   fill.className = 'ds-fill' + (pct > 65 ? ' ds-fill-high' : pct > 35 ? ' ds-fill-mid' : '');
 }
 
+/* ── Suggestion auto-dismiss ─────────────────────────────────────────────── */
+
+let _autoDismissTimer    = null;
+let _autoDismissCountdown = null;
+
+function _clearAutoDismiss() {
+  if (_autoDismissTimer)    { clearTimeout(_autoDismissTimer);   _autoDismissTimer = null; }
+  if (_autoDismissCountdown){ clearInterval(_autoDismissCountdown); _autoDismissCountdown = null; }
+  const btn = document.getElementById('sug-dismiss-btn');
+  if (btn) btn.textContent = '✕';
+}
+
+function _startAutoDismiss(urgency) {
+  _clearAutoDismiss();
+  // Higher urgency = longer window (driver needs more time to decide)
+  const totalSec = urgency >= 4 ? 50 : 30;
+  let remaining  = totalSec;
+
+  const btn = document.getElementById('sug-dismiss-btn');
+
+  _autoDismissCountdown = setInterval(() => {
+    remaining--;
+    if (btn) btn.textContent = `✕ ${remaining}s`;
+    if (remaining <= 0) _clearAutoDismiss();
+  }, 1000);
+
+  _autoDismissTimer = setTimeout(() => {
+    _clearAutoDismiss();
+    dismissSuggestion();
+    send({ type: 'user_dismiss' });
+  }, totalSec * 1000);
+}
+
 /* ── Suggestion handler ───────────────────────────────────────────────────── */
 
 const TYPE_ICONS = {
@@ -242,6 +277,9 @@ function onSuggestion(s) {
   card.className = 'suggestion-card';
   if (s.urgency >= 4) card.classList.add(`urgency-${s.urgency}`);
 
+  // Auto-dismiss if driver doesn't interact
+  _startAutoDismiss(s.urgency);
+
   document.getElementById('sug-icon').textContent    = TYPE_ICONS[s.type] || '●';
   document.getElementById('sug-type').textContent    = s.type.toUpperCase();
   document.getElementById('sug-urgency').textContent = '●'.repeat(s.urgency);
@@ -255,6 +293,9 @@ function onSuggestion(s) {
     actionRow.style.display = 'block';
     actionBtn.textContent = s.enriched_action.label || 'Act';
     actionBtn.onclick = () => handleAction(s.enriched_action);
+
+    // Hide default gas marker when enriched fuel POI is shown; flag prevents onSignal re-adding it
+    if (s.type === 'range') { _enrichedFuelShown = true; setMarker(stationMarker, 0, 0, false); }
 
     // Pin enriched POI on map with label
     if (s.enriched_action.lat && s.enriched_action.lng) {
@@ -272,39 +313,48 @@ function onSuggestion(s) {
 
 function handleAction(action) {
   if (action.type === 'navigate') {
-    const url = `https://maps.google.com/?q=${action.lat},${action.lng}`;
-    window.open(url, '_blank');
-    send({ type: 'user_accept' });
+    if (action.lat == null || action.lng == null) { send({ type: 'user_accept' }); }
+    else {
+      // Open Google Maps routing to the destination
+      const url = `https://www.google.com/maps/dir/?api=1&destination=${action.lat},${action.lng}&travelmode=driving`;
+      window.open(url, '_blank');
+      send({ type: 'user_accept' });
+    }
   } else if (action.type === 'cabin_action') {
     send({ type: 'user_accept', action: action.action });
   } else if (action.type === 'info') {
     send({ type: 'user_accept' });
   }
   // Hide card and marker immediately — don't wait for server echo
+  _clearAutoDismiss();
   document.getElementById('suggestion-card').style.display = 'none';
   document.getElementById('agent-idle').style.display = 'flex';
   setMarker(enrichedMarker, 0, 0, false);
+  _enrichedFuelShown = false;
   setAgentDot('idle');
   document.getElementById('agent-status-text').textContent = 'Listening…';
 }
 
 function dismissSuggestion() {
+  _clearAutoDismiss();
   document.getElementById('suggestion-card').style.display = 'none';
   document.getElementById('agent-idle').style.display = 'flex';
   setAgentDot('idle');
   document.getElementById('agent-status-text').textContent = 'Listening…';
   setMarker(enrichedMarker, 0, 0, false);
+  _enrichedFuelShown = false;
   send({ type: 'user_dismiss' });
 }
 
 function resetUI() {
   // Called on /sim/reset — clear all ephemeral UI state
+  _clearAutoDismiss();
   document.getElementById('suggestion-card').style.display = 'none';
   document.getElementById('agent-idle').style.display = 'flex';
   setMarker(enrichedMarker, 0, 0, false);
+  _enrichedFuelShown = false;
   setAgentDot('idle');
   document.getElementById('agent-status-text').textContent = 'Listening…';
-  document.getElementById('quiet-mode-badge').style.display = 'none';
   // Clear music/meal list
   document.getElementById('music-section').style.display = 'none';
   document.getElementById('music-tracks').innerHTML = '';
@@ -414,6 +464,37 @@ let _previewAudio = null;
 let _pausedForVoice = false;
 let _voiceAudioRef  = null;
 
+// TTS ducking — lower music volume while the assistant is speaking
+let _ttsDucked = false;
+
+function onTtsStart() {
+  if (_ttsDucked) return;
+  _ttsDucked = true;
+  // Cancel any pending auto-play timer — music must not start during speech
+  if (_autoPlayTimer) { clearTimeout(_autoPlayTimer); _autoPlayTimer = null; }
+  // Pause iTunes preview completely
+  if (_previewAudio && !_previewAudio.paused) {
+    _previewAudio.pause();
+  }
+  // Suspend Web Audio synth (CPU-friendly full stop)
+  if (player.ctx && player.ctx.state === 'running') {
+    player.ctx.suspend();
+  }
+}
+
+function onTtsEnd() {
+  if (!_ttsDucked) return;
+  _ttsDucked = false;
+  // Resume iTunes preview if it was playing
+  if (_previewAudio && _previewAudio.src) {
+    _previewAudio.play().catch(() => {});
+  }
+  // Resume synth
+  if (player.ctx && player.ctx.state === 'suspended') {
+    player.ctx.resume();
+  }
+}
+
 function _setPauseBtn(icon) {
   const btn = document.getElementById('pause-btn');
   if (btn) btn.textContent = icon;
@@ -501,6 +582,13 @@ function onTranscript(data) {
   const row = document.getElementById('transcript-row');
   const txt = document.getElementById('transcript-text');
   if (_transcriptTimer) { clearTimeout(_transcriptTimer); _transcriptTimer = null; }
+  // Empty text = ASR found no speech — silently reset to idle
+  if (!data.text) {
+    row.style.display = 'none';
+    setAgentDot('idle');
+    document.getElementById('agent-status-text').textContent = 'Listening…';
+    return;
+  }
   row.style.display = 'block';
   txt.textContent = `"${data.text}"`;
   setAgentDot('active');
@@ -508,16 +596,6 @@ function onTranscript(data) {
   _transcriptTimer = setTimeout(() => { row.style.display = 'none'; _transcriptTimer = null; }, 5000);
 }
 
-function onModeChange(data) {
-  const badge = document.getElementById('quiet-mode-badge');
-  if (!badge) return;
-  if (data.mode === 'quiet') {
-    badge.textContent = '🔇 QUIET MODE' + (data.reason ? '  —  ' + data.reason : '');
-    badge.style.display = 'block';
-  } else {
-    badge.style.display = 'none';
-  }
-}
 
 let _autoPlayTimer = null;
 function onMusicResults(data) {
@@ -676,8 +754,28 @@ let audioCtx = null;
 let pttStream = null;
 let pttProcessor = null;
 let pttSamples = [];
+let pttNativeSampleRate = 16000;  // actual rate from AudioContext (may differ from requested)
 let pttRecording = false;
 let _muted = false;
+
+// Resample Float32 audio from one sample rate to another using linear interpolation.
+// Needed because macOS often ignores the requested 16kHz and uses 44100/48000 instead,
+// causing the WAV header to lie about the sample rate — Deepgram hears noise.
+function _resample(samples, fromRate, toRate) {
+  if (fromRate === toRate) return samples;
+  const ratio = fromRate / toRate;
+  const newLen = Math.round(samples.length / ratio);
+  const out = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const pos = i * ratio;
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+    const a = samples[idx] ?? 0;
+    const b = samples[Math.min(idx + 1, samples.length - 1)] ?? 0;
+    out[i] = a + frac * (b - a);
+  }
+  return out;
+}
 
 function encodeWAV(samples, sampleRate) {
   const buf = new ArrayBuffer(44 + samples.length * 2);
@@ -721,8 +819,17 @@ async function startRecording() {
   try {
     const md = navigator.mediaDevices;
     if (!md) throw new Error('mediaDevices unavailable — open http://localhost:8000');
-    pttStream = await md.getUserMedia({ audio: true });
+    pttStream = await md.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    // Request 16kHz but capture the actual rate — browsers (especially macOS) may ignore the hint
     audioCtx = new AudioContext({ sampleRate: 16000 });
+    pttNativeSampleRate = audioCtx.sampleRate;
     const source = audioCtx.createMediaStreamSource(pttStream);
     pttProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
     pttProcessor.onaudioprocess = (e) => {
@@ -761,19 +868,27 @@ function stopRecording() {
     }, 2500);
   }
 
+  console.log('[PTT] samples captured:', pttSamples.length, '(need ≥16000 for 1s)');
   if (pttSamples.length < 16000) {  // < 1 s — skip
+    console.warn('[PTT] recording too short — dropped');
     _setBtnState(_fromWake ? 'armed' : 'idle');
     if (_fromWake) _startWakeListener();
     return;
   }
 
-  const wav = encodeWAV(new Float32Array(pttSamples), 16000);
+  const raw = new Float32Array(pttSamples);
+  const resampled = _resample(raw, pttNativeSampleRate, 16000);
+  if (pttNativeSampleRate !== 16000) {
+    console.log(`[PTT] resampled ${raw.length} @ ${pttNativeSampleRate}Hz → ${resampled.length} @ 16000Hz`);
+  }
+  const wav = encodeWAV(resampled, 16000);
   const bytes = new Uint8Array(wav);
   let binary = '';
   for (let i = 0; i < bytes.length; i += 8192) {
     binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
   }
   const b64 = btoa(binary);
+  console.log('[PTT] sending voice_input, b64 length:', b64.length, 'ws state:', ws?.readyState);
   send({ type: 'voice_input', audio: b64 });
 
   setAgentDot('thinking');
@@ -807,7 +922,6 @@ function connect() {
     else if (msg.type === 'music_results') onMusicResults(msg.data);
     else if (msg.type === 'meal_options')  onMealOptions(msg.data);
     else if (msg.type === 'transcript')    onTranscript(msg.data);
-    else if (msg.type === 'mode_change')   onModeChange(msg.data);
     else if (msg.type === 'user_accept')   {
       document.getElementById('suggestion-card').style.display = 'none';
       document.getElementById('agent-idle').style.display = 'flex';
@@ -817,6 +931,8 @@ function connect() {
     }
     else if (msg.type === 'user_dismiss')  dismissSuggestion();
     else if (msg.type === 'reset_ui')      resetUI();
+    else if (msg.type === 'tts_start')     onTtsStart();
+    else if (msg.type === 'tts_end')       onTtsEnd();
   };
 }
 
@@ -988,7 +1104,20 @@ document.getElementById('sug-dismiss-btn').addEventListener('click', dismissSugg
   const gpsBtn = document.getElementById('gps-btn');
   if (gpsBtn) gpsBtn.addEventListener('click', toggleGPS);
 
-  // One-shot GPS fix on load to set real position without continuous tracking
+  // One-shot GPS fix on load — falls back to IP geolocation if browser GPS unavailable/denied
+  async function _ipGeoFallback() {
+    try {
+      const r = await fetch('https://ipapi.co/json/');
+      const d = await r.json();
+      if (d.latitude && d.longitude) {
+        const label = `${d.city || ''}, ${d.region || d.country_name || ''}`.replace(/^, |, $/, '');
+        send({ type: 'gps_update', lat: d.latitude, lng: d.longitude, label: label || null });
+        map.setView([d.latitude, d.longitude], 12);
+        console.log('[GPS] IP geolocation fallback:', label);
+      }
+    } catch (_) {}
+  }
+
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
@@ -996,9 +1125,11 @@ document.getElementById('sug-dismiss-btn').addEventListener('click', dismissSugg
         const label = await _reverseGeocode(lat, lng);
         send({ type: 'gps_update', lat, lng, label });
       },
-      () => {},  // silently ignore if denied
+      () => _ipGeoFallback(),  // browser GPS denied or unavailable → try IP
       { enableHighAccuracy: true, timeout: 8000 }
     );
+  } else {
+    _ipGeoFallback();  // geolocation API not available at all (e.g. desktop HTTP)
   }
 
   // Mute toggle

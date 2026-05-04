@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Concierge</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚗</text></svg>">
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 </head>
@@ -34,6 +35,11 @@
         <div class="pill">
           <span class="pill-val" id="range-val">280</span>
           <span class="pill-unit">km range</span>
+        </div>
+        <div class="pill-sep">·</div>
+        <div class="pill">
+          <span class="pill-val" id="rpm-val">2200</span>
+          <span class="pill-unit">rpm</span>
         </div>
         <div class="pill-sep">·</div>
         <div class="pill">
@@ -116,9 +122,6 @@
           </div>
         </div>
 
-        <!-- Quiet mode badge — shown during conference call mode -->
-        <div id="quiet-mode-badge" class="quiet-mode-badge" style="display:none"></div>
-
         <!-- Single voice button: idle → armed → recording -->
         <button id="ptt-btn" class="ptt-btn" title="Tap to speak / say Hey Concierge">
           <span id="ptt-icon">🎙</span>
@@ -194,8 +197,6 @@
           <span class="status-val" id="station-km">45 km</span>
         </div>
       </div>
-
-
 
     </div>
   </div>

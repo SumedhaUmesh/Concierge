@@ -47,6 +47,11 @@ def _compact(state) -> dict:
         "normal_travel_min": d.get("normal_travel_minutes"),
         "next_station_km": round(d.get("next_gas_station_km", 999)),
         "driving_min": round(d.get("minutes_driving_continuously", 0)),
+        # Cognitive Driver Model — stamped by AgentLoop.tick() before gate runs
+        "fatigue":    round(d.get("fatigue_index", 0.0), 2),
+        "cog_load":   round(d.get("cognitive_load", 0.0), 2),
+        "stress":     round(d.get("stress_index", 0.0), 2),
+        "driver_risk": d.get("driver_risk", "low"),
     }
 
 
@@ -96,8 +101,32 @@ def _score_triggers(s: dict, last_type: Optional[str]) -> list[tuple[int, str]]:
         urgency = 4 if meal_hours > meal_threshold + 2 else 3
         candidates.append((urgency, f"driver hasn't eaten in {meal_hours:.1f} hours during mealtime — suggest a nearby restaurant (type=meal)"))
 
+    # Meeting lateness: only fire when driver is actually at risk of being late
+    meeting = s.get("meeting")
+    time_str = s.get("time", "")
+    if meeting and time_str and "@" in meeting:
+        try:
+            mtg_time_str = meeting.split("@")[-1].strip()
+
+            def _hm(t: str) -> int:
+                h, m = t.strip().split(":")
+                return int(h) * 60 + int(m)
+
+            mins_until = _hm(mtg_time_str) - _hm(time_str)
+            travel_min = (s.get("normal_travel_min") or 0) + (s.get("traffic_delay_min") or 0)
+            buffer_min = 10
+            if 0 < mins_until < travel_min + buffer_min:
+                urgency = 5 if mins_until < travel_min else 4
+                candidates.append((
+                    urgency,
+                    f"driver may be late for {meeting.split('@')[0].strip()} — "
+                    f"{mins_until:.0f} min left, needs {travel_min:.0f} min — suggest leaving now (type=schedule)",
+                ))
+        except Exception:
+            pass
+
     # Remove triggers that repeat the last type (except critical safety ones)
-    SAFETY_TYPES = {"cabin", "range"}
+    SAFETY_TYPES = {"cabin", "range", "schedule"}
     filtered = [
         (u, t) for u, t in candidates
         if last_type is None
@@ -105,7 +134,46 @@ def _score_triggers(s: dict, last_type: Optional[str]) -> list[tuple[int, str]]:
         or u >= 5
     ]
 
+    # Cognitive load suppression: high load → skip non-safety triggers
+    cog_load = s.get("cog_load", 0)
+    if cog_load > 0.70:
+        safety_only = [(u, t) for u, t in filtered if u >= 4]
+        if safety_only != filtered:
+            log.info("Gate: high cognitive load (%.2f) — suppressed %d low-urgency trigger(s)",
+                     cog_load, len(filtered) - len(safety_only))
+            filtered = safety_only
+
+    # High stress: suppress meal/music/comfort unless safety-critical
+    stress = s.get("stress", 0)
+    if stress > 0.75:
+        stress_ok = [(u, t) for u, t in filtered
+                     if u >= 5 or any(kw in t for kw in ("fuel", "rain", "late", "schedule"))]
+        if stress_ok != filtered:
+            log.info("Gate: high stress (%.2f) — suppressed %d non-critical trigger(s)",
+                     stress, len(filtered) - len(stress_ok))
+            filtered = stress_ok
+
     return sorted(filtered, key=lambda x: x[0], reverse=True)
+
+
+def get_secondary_trigger(state_window: list, primary_trigger: str) -> Optional[str]:
+    """
+    Return a second urgency-5 trigger of a DIFFERENT type when two critical conditions
+    exist simultaneously (e.g. low fuel AND rain with windows open).
+    Called by AgentLoop after firing the primary suggestion.
+    """
+    if not state_window:
+        return None
+    s = _compact(state_window[-1])
+    candidates = _score_triggers(s, None)
+    primary_type = primary_trigger.split("type=")[-1].rstrip(")").strip() if "type=" in primary_trigger else ""
+    for urgency, trigger in candidates:
+        if urgency < 5:
+            break
+        trigger_type = trigger.split("type=")[-1].rstrip(")").strip() if "type=" in trigger else ""
+        if trigger_type and trigger_type != primary_type:
+            return trigger
+    return None
 
 
 def _python_precheck(
@@ -134,8 +202,9 @@ def _python_precheck(
     fuel_watch       = s.get("fuel_pct", 100) < 30
     fatigue_watch    = s.get("driving_min", 0) > 60
     traffic_notable  = s.get("traffic_delay_min", 0) > 5
+    risk_elevated    = s.get("driver_risk") in ("moderate", "high")
 
-    if not any([has_meeting, meal_approaching, fuel_watch, fatigue_watch, traffic_notable]):
+    if not any([has_meeting, meal_approaching, fuel_watch, fatigue_watch, traffic_notable, risk_elevated]):
         return False, None   # nothing interesting — skip LLM entirely
 
     return None, None  # let the LLM handle schedule / ambiguous cases

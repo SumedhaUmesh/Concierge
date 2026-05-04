@@ -36,20 +36,23 @@ _note() {
   echo -e "  ${DIM}  $1${NC}"
 }
 
+_bug() {
+  echo -e "  ${RED}🐛 Bug fixed:${NC} $1"
+}
+
 _next() {
   echo ""
   echo -e "${DIM}  Press Enter to continue, Ctrl+C to quit...${NC}"
   read -r
 }
 
-# ── compute meeting times ────────────────────────────────────────────────────
+# ── compute meeting times from real clock ────────────────────────────────────
 _add_minutes() {
   local h=$(date +%H) m=$(date +%M)
   local total=$(( 10#$h * 60 + 10#$m + $1 ))
   printf "%02d:%02d" $(( total / 60 % 24 )) $(( total % 60 ))
 }
 
-MTG_NEAR=$(_add_minutes 4)    # 4 min from now — triggers quiet mode
 MTG_FAR=$(_add_minutes 15)    # 15 min from now — shows in sidebar
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -62,7 +65,7 @@ open "http://localhost:8000" 2>/dev/null || true
 _next
 
 # ── 1. Fuel / Range ─────────────────────────────────────────────────────────
-_title "1 / 10  —  FUEL WARNING"
+_title "1 / 9  —  FUEL WARNING"
 _reset
 _state '{"fuel_percent": 12, "range_km": 45, "speed_kmh": 110}'
 _expect "Fuel gauge turns red  •  Urgency-4 card fires in ~5s"
@@ -73,7 +76,7 @@ _action "Click 'Navigate to …' to open Google Maps, or dismiss"
 _next
 
 # ── 2. Rain + open windows ───────────────────────────────────────────────────
-_title "2 / 10  —  RAIN + OPEN WINDOWS"
+_title "2 / 9  — RAIN + OPEN WINDOWS"
 _reset
 _state '{"rain_in_minutes": 8, "windows_open": true, "sunroof_open": true}'
 _expect "Rain row appears in sidebar  •  Cabin card fires in ~5s"
@@ -82,111 +85,160 @@ _expect "Action button: 'Close windows & start AC'"
 _action "Accept → windows/sunroof close, AC turns on (check sidebar)"
 _next
 
-# ── 3. Skipped meal ──────────────────────────────────────────────────────────
-_title "3 / 10  —  SKIPPED MEAL"
+# ── 3. Meal suggestion — preference first ────────────────────────────────────
+_title "3 / 9  — MEAL SUGGESTION (preference first)"
 _reset
 _state '{"hours_since_meal": 6.5, "current_time": "13:00", "speed_kmh": 90}'
-_expect "Meal card fires in ~5s  •  Nearest restaurant pinned on map"
-_expect "Action button: Navigate to restaurant"
-_action "Click action or say 'yes' to accept, or dismiss"
+echo ""
+_expect "Within ~5s: TTS asks 'What are you in the mood for?' + cuisine list"
+_expect "Dashboard shows meal options (not a single restaurant card)"
+_expect "System waits for your preference before picking a restaurant"
+echo ""
+echo -e "  ${YELLOW}Step 1:${NC} Wait for the preference question to appear"
+echo -e "  ${YELLOW}Step 2:${NC} Click a cuisine tile or say a preference (e.g. 'Mexican')"
+echo -e "  ${GREEN}Expect:${NC}  Specific restaurant card with Navigate button"
+echo ""
+_note "Improvement: system asks first → feels like an assistant, not a vending machine"
 _next
 
-# ── 4. Meeting + traffic ─────────────────────────────────────────────────────
-_title "4 / 10  —  MEETING + TRAFFIC DELAY"
+# ── 4. Meeting + traffic — fires only when at risk of being late ─────────────
+_title "4 / 9  — MEETING + TRAFFIC (lateness-based trigger)"
 _reset
-_state "{\"next_meeting_title\": \"Team standup\", \"next_meeting_time\": \"$MTG_FAR\", \"traffic_delay_minutes\": 12, \"speed_kmh\": 80}"
-_expect "Meeting card appears in sidebar with time + traffic warning"
-_expect "Schedule suggestion fires: leave now to make it on time"
-_note "Meeting set for $MTG_FAR (15 min from now)"
+# Fixed clock state: meeting at 14:25, current time 14:00
+# travel=20 min + traffic=12 min = needs 32 min, has 25 → 7 min late → fires
+_state '{"current_time": "14:00", "next_meeting_title": "Dinner Reservation", "next_meeting_time": "14:25", "normal_travel_minutes": 20, "traffic_delay_minutes": 12, "speed_kmh": 80}'
+echo ""
+_expect "Schedule card fires: 'may be late for Dinner Reservation'"
+_expect "Detail: 25 min left, needs 32 min (20 travel + 12 traffic)"
+_expect "Action button: 'Start navigation'"
+echo ""
+_note "Current time: 14:00  •  Meeting: 14:25  •  Travel: 20 min  •  Traffic: +12 min"
+_note "Trigger fires because 25 min left < 32 min needed"
+echo ""
+echo -e "  ${YELLOW}Contrast — this should NOT trigger (plenty of time):${NC}"
+echo -e "  ${DIM}curl -X POST $BASE/sim/state -H 'Content-Type: application/json'${NC}"
+echo -e "  ${DIM}     -d '{\"current_time\": \"13:00\", \"next_meeting_time\": \"15:00\",${NC}"
+echo -e "  ${DIM}          \"normal_travel_minutes\": 20, \"traffic_delay_minutes\": 5}'${NC}"
+_note "Gate should stay silent — 60 min left, only needs 25 min"
 _next
 
-# ── 5. Driver fatigue → rest stop ────────────────────────────────────────────
-_title "5 / 10  —  FATIGUE + REST STOP"
+# ── 5. Fatigue + rest stop ───────────────────────────────────────────────────
+_title "5 / 9  — FATIGUE + REST STOP"
 _reset
 _state '{"minutes_driving_continuously": 130, "current_time": "02:00", "speed_kmh": 100, "next_rest_stop_lat": 34.052, "next_rest_stop_lng": -118.452, "next_rest_stop_km": 8.5}'
-_expect "Fatigue bar spikes HIGH (red)  •  Risk shows HIGH"
-_expect "Rest stop suggestion fires  •  Rest stop marker on map"
-_action "Accept to navigate to rest stop"
+_expect "Fatigue bar HIGH (red)  •  Risk level: HIGH"
+_expect "Rest stop suggestion fires  •  Rest stop marker pinned on map"
+_expect "Card headline: 'Rest stop 8 km ahead — take a break'"
+_expect "Action button: Navigate to rest stop"
+_action "Accept to navigate  •  Map should pan to rest stop pin"
 _next
 
-# ── 6. Cognitive Driver Model ────────────────────────────────────────────────
-_title "6 / 10  —  COGNITIVE DRIVER MODEL (all bars)"
+# ── 6. Compound query — coffee + meeting time check ──────────────────────────
+_title "6 / 9  — COMPOUND QUERY  (coffee shop + meeting awareness)"
 _reset
-_state '{"minutes_driving_continuously": 100, "speed_kmh": 130, "traffic_delay_minutes": 20, "fuel_percent": 15, "current_time": "23:30", "rain_in_minutes": 5}'
-_expect "FATIGUE bar: high (long drive + late night)"
-_expect "LOAD bar: high (speed + traffic + rain)"
-_expect "STRESS bar: high (low fuel + traffic + speed)"
-_expect "Risk level: MODERATE or HIGH"
-_note "All three signals combined — watch all three bars animate"
+# Meeting at 15:00, current time 14:00, travel=30 min → 30 min margin after detour
+_state '{"current_time": "14:00", "next_meeting_title": "Client call", "next_meeting_time": "15:00", "normal_travel_minutes": 30, "traffic_delay_minutes": 0, "speed_kmh": 70, "lat": 34.052, "lng": -118.243}'
+echo ""
+echo -e "  Tap ${BOLD}🎙${NC} and say:"
+echo ""
+echo -e "  ${YELLOW}\"Find me a good coffee shop on my route and tell me if I have time before my next meeting\"${NC}"
+echo ""
+_expect "Coffee shop found and filtered to route"
+_expect "Detour time calculated via OSRM"
+_expect "Spoken verdict — one of:"
+echo -e "  ${GREEN}  → Has time:${NC} 'Blue Bottle is 4 min off your route. Meeting in 60 min. You have enough time for a quick stop.'"
+echo -e "  ${GREEN}  → Tight:   ${NC} 'It\\'d be tight — your meeting is in 60 minutes. I\\'d skip it today.'"
+_expect "Suggestion card with Navigate button"
+echo ""
+_note "Multi-intent: meal + schedule triggers compound handler (no LLM call)"
+echo ""
+echo -e "  ${YELLOW}Try the tight version:${NC}"
+echo -e "  ${DIM}curl -X POST $BASE/sim/state -H 'Content-Type: application/json'${NC}"
+echo -e "  ${DIM}     -d '{\"next_meeting_time\": \"14:20\", \"current_time\": \"14:00\", \"normal_travel_minutes\": 18}'${NC}"
+_note "Only 20 min left + 18 min drive → no time for coffee"
 _next
 
-# ── 7. Voice — emotional fast-path ───────────────────────────────────────────
-_title "7 / 10  —  VOICE + EMOTIONAL FAST-PATH"
+# ── 7. Voice — cabin control (not dismiss) ───────────────────────────────────
+_title "7 / 9  — VOICE + CABIN CONTROL"
 _reset
-_state '{"speed_kmh": 80}'
+_state '{"speed_kmh": 80, "cabin_temp_c": 26}'
 echo ""
-echo -e "  Tap ${BOLD}🎙${NC} and say each phrase — watch music + cabin update instantly:"
+_bug "Previously: 'It\\'s too hot' was classified as DISMISS (triggered cooldown)"
+echo -e "  ${GREEN}Fixed:${NC}    Cabin/comfort keywords bypass classifier entirely"
 echo ""
-echo -e "  ${YELLOW}Say:${NC} \"I'm tired\"        → cool cabin (19°C) + calm music + alerts suppressed"
-echo -e "  ${YELLOW}Say:${NC} \"I'm stressed\"      → calm music (energy 2) + 21°C"
-echo -e "  ${YELLOW}Say:${NC} \"I'm energetic\"     → upbeat music (energy 8) + 20°C"
-echo -e "  ${YELLOW}Say:${NC} \"It's too hot\"      → AC on + cabin drops to 18°C"
-echo -e "  ${YELLOW}Say:${NC} \"I'm bored\"         → upbeat groovy music"
-echo -e "  ${YELLOW}Say:${NC} \"Find a scenic route\" → calm music + alerts suppressed 20 min"
+echo -e "  Tap ${BOLD}🎙${NC} and say each phrase:"
 echo ""
-_note "No LLM call — these fire instantly via keyword matching"
+echo -e "  ${YELLOW}Say:${NC} \"It's too hot\"     → AC on, cabin drops to 18°C  (NOT dismiss)"
+echo -e "  ${YELLOW}Say:${NC} \"I'm cold\"          → cabin warms to 24°C"
+echo -e "  ${YELLOW}Say:${NC} \"Turn on the AC\"    → AC on + cabin cools"
+echo -e "  ${YELLOW}Say:${NC} \"Open the window\"   → windows open in sidebar"
+echo -e "  ${YELLOW}Say:${NC} \"Close the sunroof\" → sunroof closes in sidebar"
+echo ""
+_expect "Each phrase: cabin sidebar reflects the change"
+_expect "TTS confirms the action ('I'll cool the cabin down for you')"
+_expect "Agent dismiss streak is NOT incremented"
+echo ""
+echo -e "  ${DIM}Other emotional phrases still work:${NC}"
+echo -e "  ${YELLOW}Say:${NC} \"I'm tired\"       → cool cabin (19°C) + calm music + alerts suppressed"
+echo -e "  ${YELLOW}Say:${NC} \"I'm stressed\"    → calm music + 21°C"
+echo -e "  ${YELLOW}Say:${NC} \"I'm energetic\"   → upbeat music + 20°C"
 _next
 
-# ── 8. Two-turn meal flow ────────────────────────────────────────────────────
-_title "8 / 10  —  VOICE + TWO-TURN MEAL FLOW"
+# ── 9. Meal flow — two paths ─────────────────────────────────────────────────
+_title "8 / 9  — VOICE + MEAL FLOW (two paths)"
 _reset
 _state '{"hours_since_meal": 5.0, "speed_kmh": 70}'
 echo ""
-echo -e "  ${YELLOW}Step 1:${NC} Say \"I'm hungry\""
-echo -e "  ${GREEN}Concierge asks:${NC} what cuisine? lists nearby options"
-echo -e "  ${YELLOW}Step 2:${NC} Say a cuisine (e.g. \"Mexican\") or restaurant name"
-echo -e "  ${GREEN}Concierge:${NC} \"Great, heading to [Name]\" — navigation card appears"
+echo -e "  ${BOLD}Path A — vague request (two turns):${NC}"
+echo -e "  ${YELLOW}Say:${NC} \"I'm hungry\""
+echo -e "  ${GREEN}Expect:${NC} Concierge asks 'What are you in the mood for?' + cuisine list"
+echo -e "  ${YELLOW}Then say:${NC} a cuisine  (e.g. 'Mexican' / 'burger' / 'Italian' / 'sandwich')"
+echo -e "  ${GREEN}Expect:${NC} Restaurant card + map pin  (no second question)"
 echo ""
+echo -e "  ${BOLD}Path B — specific request (single turn):${NC}"
+_bug "Previously: 'I feel like drinking a coffee' asked preference question anyway"
+echo -e "  ${GREEN}Fixed:${NC}    Preference detected in original utterance → skips question"
+echo ""
+echo -e "  ${YELLOW}Say:${NC} \"I feel like drinking a coffee\""
+echo -e "  ${GREEN}Expect:${NC} No preference question — goes straight to nearest café + card"
+echo -e "  ${YELLOW}Say:${NC} \"Get me a burger\""
+echo -e "  ${GREEN}Expect:${NC} No question — straight to nearest burger place"
+echo ""
+_expect "If no exact match: honest fallback ('closest I found is [Name]')"
+_note "Vague = 'I'm hungry' / 'find me food'  →  asks  •  Specific = 'coffee/burger/pizza'  →  skips"
 _next
 
-# ── 9. Conference call / quiet mode ──────────────────────────────────────────
-_title "9 / 10  —  CONFERENCE CALL MODE"
-_reset
-_state "{\"next_meeting_title\": \"Demo call\", \"next_meeting_time\": \"$MTG_NEAR\", \"speed_kmh\": 60}"
-echo ""
-echo -e "  Meeting set for ${BOLD}$MTG_NEAR${NC} (4 minutes from now)"
-echo -e "  ${DIM}Watch loop checks every 30s — wait up to 30s for it to fire${NC}"
-echo ""
-_expect "TTS: 'Entering quiet mode — meeting in 4 minutes'"
-_expect "Purple 🔇 QUIET MODE badge appears in sidebar"
-_expect "Windows/sunroof close, AC turns on"
-_expect "Agent goes silent (alerts suppressed 60 min)"
-echo ""
-echo -e "  ${YELLOW}To exit quiet mode:${NC}"
-echo -e "  ${DIM}curl -X POST $BASE/sim/state -H 'Content-Type: application/json' -d '{\"next_meeting_time\": null, \"next_meeting_title\": null}'${NC}"
-_expect "TTS: 'Quiet mode ended. Welcome back.' Badge disappears."
-_next
-
-# ── 10. Music concierge ──────────────────────────────────────────────────────
-_title "10 / 10  —  MUSIC CONCIERGE"
+# ── 10. Music concierge + TTS stop ──────────────────────────────────────────
+_title "9 / 9  — MUSIC CONCIERGE + TTS STOP"
 _reset
 _state '{"speed_kmh": 90}'
 echo ""
-echo -e "  ${YELLOW}Say:${NC} \"play something calm\"  or  \"I want upbeat music\""
+echo -e "  ${YELLOW}Say:${NC} \"play something calm\"      → mellow synth + 5 tracks listed"
+echo -e "  ${YELLOW}Say:${NC} \"I want upbeat music\"       → high-energy synth"
 echo -e "  ${YELLOW}Say:${NC} \"play Blinding Lights by The Weeknd\"  (iTunes direct search)"
 echo ""
 _expect "Music section appears with 5 tracks"
 _expect "Click a track → synth plays immediately"
-_expect "After ~2s iTunes preview replaces synth (track name updates)"
+_expect "After ~2s iTunes preview replaces synth (track name in now-playing bar)"
 _expect "Pause ⏸ and Stop ■ buttons work"
 echo ""
+echo -e "  ${BOLD}TTS stop — while music is playing:${NC}"
+echo -e "  ${YELLOW}Say:${NC} anything  (e.g. \"what's the range?\")  while music plays"
+_expect "Music stops completely the instant TTS starts speaking"
+_expect "Music resumes after TTS finishes"
+_note "Server broadcasts tts_start / tts_end  •  Frontend pauses/resumes audio context + preview"
+_next
+
+
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 _reset
+echo ""
 echo -e "${BOLD}${GREEN}  All scenarios complete. State has been reset.${NC}"
 echo ""
-echo -e "  Useful endpoints:"
-echo -e "  ${DIM}curl $BASE/privacy | python3 -m json.tool${NC}"
-echo -e "  ${DIM}curl $BASE/memory/stats | python3 -m json.tool${NC}"
-echo -e "  ${DIM}curl $BASE/driver/state | python3 -m json.tool${NC}"
+echo -e "  ${BOLD}Useful endpoints:${NC}"
+echo -e "  ${DIM}curl $BASE/privacy              | python3 -m json.tool${NC}"
+echo -e "  ${DIM}curl $BASE/memory/stats         | python3 -m json.tool${NC}"
+echo -e "  ${DIM}curl $BASE/driver/state         | python3 -m json.tool${NC}"
+echo -e "  ${DIM}curl $BASE/agent/stats          | python3 -m json.tool${NC}"
 echo ""

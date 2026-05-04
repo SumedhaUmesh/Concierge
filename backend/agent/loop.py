@@ -11,7 +11,7 @@ import logging
 import time
 from typing import Callable, Optional
 
-from agent.gate import should_speak
+from agent.gate import should_speak, get_secondary_trigger
 from agent.generator import generate_suggestion
 from agent.driver_model import compute as compute_driver_state
 from signals import Signal, Suggestion
@@ -163,6 +163,23 @@ class AgentLoop:
         except Exception:
             log.exception("on_suggestion callback failed (forced)")
 
+    async def _run_secondary(self, trigger: str) -> None:
+        """Fire a second critical suggestion 20 s after the primary one."""
+        await asyncio.sleep(20)
+        if not self._window:
+            return
+        suggestion = await generate_suggestion(self._window, trigger=trigger)
+        if suggestion is None:
+            return
+        self._last_suggestion_at = time.monotonic()
+        self._last_suggestion_type = suggestion.type
+        try:
+            result = self._on_suggestion(suggestion)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            log.exception("on_suggestion callback failed (secondary)")
+
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _check_geofence(self, state: Signal, now: float) -> None:
@@ -223,3 +240,10 @@ class AgentLoop:
                 await result
         except Exception:
             log.exception("on_suggestion callback failed")
+
+        # If a second urgency-5 trigger of a different type exists, fire it after 20 s
+        # so the driver hears both critical alerts without being overwhelmed at once.
+        secondary = get_secondary_trigger(self._window, trigger)
+        if secondary:
+            log.info("AgentLoop: secondary critical trigger queued in 20s — %s", secondary[:60])
+            asyncio.create_task(self._run_secondary(secondary))

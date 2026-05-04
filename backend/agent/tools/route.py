@@ -6,6 +6,7 @@ as a list of (lat, lon) tuples. Used by the POI tool to filter results
 to places that are actually on the driver's route.
 """
 
+import asyncio
 import logging
 import math
 from typing import Optional
@@ -17,6 +18,7 @@ log = logging.getLogger(__name__)
 OSRM_URL = "http://router.project-osrm.org/route/v1/driving"
 
 _route_cache: dict[tuple, list] = {}
+_duration_cache: dict[tuple, float] = {}
 
 
 async def get_route(
@@ -33,25 +35,68 @@ async def get_route(
         return _route_cache[key]
 
     url = f"{OSRM_URL}/{origin_lon},{origin_lat};{dest_lon},{dest_lat}"
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=8)
-        ) as session:
-            async with session.get(url, params={"overview": "full", "geometries": "geojson"}) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+    for attempt in range(2):
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as session:
+                async with session.get(url, params={"overview": "full", "geometries": "geojson"}) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
 
-        # OSRM returns coordinates as [lon, lat]
-        coords = data["routes"][0]["geometry"]["coordinates"]
-        route = [(lat, lon) for lon, lat in coords]
-        log.info("OSRM route: %d points, %.1f km",
-                 len(route), data["routes"][0]["distance"] / 1000)
-        _route_cache[key] = route
-        return route
+            route_data = data["routes"][0]
+            coords = route_data["geometry"]["coordinates"]
+            route = [(lat, lon) for lon, lat in coords]
+            duration_min = route_data["duration"] / 60.0
+            log.info("OSRM route: %d points, %.1f km, %.0f min",
+                     len(route), route_data["distance"] / 1000, duration_min)
+            _route_cache[key] = route
+            _duration_cache[key] = duration_min
+            return route
 
-    except Exception as exc:
-        log.warning("OSRM route request failed (%s) — falling back to radius search", exc)
-        return None
+        except Exception as exc:
+            if attempt == 0:
+                log.warning("OSRM route attempt 1 failed (%s) — retrying", exc)
+                await asyncio.sleep(1.0)
+            else:
+                log.warning("OSRM route request failed (%s) — falling back to radius search", exc)
+    return None
+
+
+async def get_travel_time(
+    origin_lat: float, origin_lon: float,
+    dest_lat: float, dest_lon: float,
+) -> Optional[float]:
+    """
+    Return estimated driving time in minutes between two points.
+    Uses a lightweight OSRM call (no geometry) — faster than get_route.
+    Returns cached value if the same pair was already routed.
+    """
+    key = (round(origin_lat, 3), round(origin_lon, 3),
+           round(dest_lat, 3), round(dest_lon, 3))
+    if key in _duration_cache:
+        return _duration_cache[key]
+
+    url = f"{OSRM_URL}/{origin_lon},{origin_lat};{dest_lon},{dest_lat}"
+    for attempt in range(2):
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=6)
+            ) as session:
+                async with session.get(url, params={"overview": "false"}) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+            minutes = data["routes"][0]["duration"] / 60.0
+            _duration_cache[key] = minutes
+            log.info("OSRM travel time: %.0f min", minutes)
+            return minutes
+        except Exception as exc:
+            if attempt == 0:
+                log.warning("OSRM travel time attempt 1 failed (%s) — retrying", exc)
+                await asyncio.sleep(1.0)
+            else:
+                log.warning("OSRM travel time failed (%s)", exc)
+    return None
 
 
 def point_to_segment_dist(

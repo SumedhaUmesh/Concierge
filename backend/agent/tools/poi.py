@@ -7,7 +7,7 @@ Results are cached in-memory per (category, rounded lat/lon) for the session.
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
@@ -16,7 +16,6 @@ log = logging.getLogger(__name__)
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_HEADERS = {"User-Agent": "Concierge/1.0 (portfolio demo)"}
-
 # amenity= values for structured Nominatim search
 _CATEGORY_AMENITIES = {
     "fuel":  ["fuel"],
@@ -98,46 +97,62 @@ async def find_poi(
                             "viewbox": viewbox, "bounded": 1, "extratags": 1, "namedetails": 1})
 
         for params in queries:
-            try:
-                async with session.get(NOMINATIM_URL, params=params) as resp:
-                    resp.raise_for_status()
-                    results = await resp.json(content_type=None)
+            label = params.get("amenity") or params.get("q")
+            results = []
+            for attempt in range(3):
+                rate_limited = False
+                try:
+                    async with session.get(NOMINATIM_URL, params=params) as resp:
+                        if resp.status == 429:
+                            rate_limited = True
+                        else:
+                            resp.raise_for_status()
+                            results = await resp.json(content_type=None)
+                except Exception as exc:
+                    log.warning("Nominatim request failed for %s: %s", label, exc)
+                    break
+                if results:
+                    break
+                if rate_limited:
+                    wait = 2.0 ** attempt
+                    log.warning("Nominatim rate-limited — retrying in %.0fs (attempt %d/3)", wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                else:
+                    break
 
-                label = params.get("amenity") or params.get("q")
-                log.info("Nominatim[%s/%s]: %d results", category, label, len(results))
+            if not results:
+                continue
 
-                for r in results:
-                    if not r or not isinstance(r, dict):
-                        continue
-                    name = (r.get("namedetails") or {}).get("name") or r.get("display_name", "").split(",")[0]
-                    if not name or len(name) < 2:
-                        continue
-                    try:
-                        poi_lat, poi_lon = float(r["lat"]), float(r["lon"])
-                    except (KeyError, ValueError):
-                        continue
-                    dist = _haversine(lat, lon, poi_lat, poi_lon)
-                    if dist > radius_km:
-                        continue
-                    extra = r.get("extratags") or {}
-                    cuisine = extra.get("cuisine", "").replace(";", ", ").replace("_", " ")
-                    # Use shop type as cuisine label when no cuisine tag
-                    if not cuisine:
-                        shop_type = extra.get("shop", "")
-                        if shop_type:
-                            cuisine = shop_type.replace("_", " ").title()
-                    address_parts = r.get("display_name", "").split(",")
-                    address = ", ".join(p.strip() for p in address_parts[1:3]) if len(address_parts) > 1 else ""
-                    all_pois.append(POI(
-                        name=name,
-                        distance_km=round(dist, 1),
-                        lat=poi_lat,
-                        lng=poi_lon,
-                        address=address,
-                        cuisine=cuisine,
-                    ))
-            except Exception as exc:
-                log.warning("Nominatim request failed for %s: %s", params.get("amenity") or params.get("q"), exc)
+            log.info("Nominatim[%s/%s]: %d results", category, label, len(results))
+            for r in results:
+                if not r or not isinstance(r, dict):
+                    continue
+                name = (r.get("namedetails") or {}).get("name") or r.get("display_name", "").split(",")[0]
+                if not name or len(name) < 2:
+                    continue
+                try:
+                    poi_lat, poi_lon = float(r["lat"]), float(r["lon"])
+                except (KeyError, ValueError):
+                    continue
+                dist = _haversine(lat, lon, poi_lat, poi_lon)
+                if dist > radius_km:
+                    continue
+                extra = r.get("extratags") or {}
+                cuisine = extra.get("cuisine", "").replace(";", ", ").replace("_", " ")
+                if not cuisine:
+                    shop_type = extra.get("shop", "")
+                    if shop_type:
+                        cuisine = shop_type.replace("_", " ").title()
+                address_parts = r.get("display_name", "").split(",")
+                address = ", ".join(p.strip() for p in address_parts[1:3]) if len(address_parts) > 1 else ""
+                all_pois.append(POI(
+                    name=name,
+                    distance_km=round(dist, 1),
+                    lat=poi_lat,
+                    lng=poi_lon,
+                    address=address,
+                    cuisine=cuisine,
+                ))
 
     all_pois.sort(key=lambda p: p.distance_km)
 

@@ -18,6 +18,7 @@ class Signal:
     fuel_percent: float = 65.0
     range_km: float = 280.0
     speed_kmh: float = 110.0
+    rpm: int = 2200
     is_on_highway: bool = True
 
     # Position (default: downtown Culver City)
